@@ -178,6 +178,64 @@ EOF
   [ "$cont" = "true" ]
 }
 
+@test "handler: plugin self-allow via \$CLAUDE_PLUGIN_ROOT (fake path)" {
+  # Claude Code sets CLAUDE_PLUGIN_ROOT for every hook invocation. Using this
+  # env var is the authoritative way to locate the plugin install, so the
+  # self-allow must work even for totally synthetic paths.
+  fake_root="$TMP/fakeplugin"
+  mkdir -p "$fake_root/scripts"
+  cmd="bash $fake_root/scripts/verify.sh"
+  payload="$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  run bash -c "CLAUDE_PLUGIN_ROOT='$fake_root' printf '%s' \"\$1\" | CLAUDE_PLUGIN_ROOT='$fake_root' bash '$HANDLER'" _ "$payload"
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [ "$decision" = "allow" ]
+  [[ "$reason" == *"self-allow"* ]]
+}
+
+@test "handler: plugin self-allow via \$CLAUDE_PLUGIN_ROOT for realistic cache install path" {
+  # Real-world install path shape:
+  #   ~/.claude/plugins/cache/<marketplace>/<plugin-name>/<version>/
+  # The old regex required literal `claude-passthru` in the path, so this
+  # shape (which is what users actually get) never matched.
+  real_root="$USER_ROOT/.claude/plugins/cache/passthru/passthru/0.1.0"
+  mkdir -p "$real_root/scripts"
+  cmd="bash $real_root/scripts/verify.sh"
+  payload="$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  run bash -c "CLAUDE_PLUGIN_ROOT='$real_root' printf '%s' \"\$1\" | CLAUDE_PLUGIN_ROOT='$real_root' bash '$HANDLER'" _ "$payload"
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  [ "$decision" = "allow" ]
+}
+
+@test "handler: plugin self-allow via fallback regex for cache/passthru/passthru/<ver>/ path (no env)" {
+  # Same realistic install path but without CLAUDE_PLUGIN_ROOT set. The
+  # fallback regex must still recognise `passthru` as a path segment so
+  # manual pipe-testing and legacy harnesses continue to work.
+  cmd='bash /Users/alice/.claude/plugins/cache/passthru/passthru/0.1.0/scripts/verify.sh'
+  payload="$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  run_handler "$payload"
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  [ "$decision" = "allow" ]
+}
+
+@test "handler: self-allow via \$CLAUDE_PLUGIN_ROOT rejects unknown script names" {
+  # Defense in depth: even if the prefix matches CLAUDE_PLUGIN_ROOT, only
+  # the plugin's known scripts are self-allowed. An arbitrary foo.sh living
+  # under the plugin root should not get a free pass.
+  fake_root="$TMP/fakeplugin"
+  mkdir -p "$fake_root/scripts"
+  cmd="bash $fake_root/scripts/evil.sh"
+  payload="$(jq -cn --arg c "$cmd" '{tool_name:"Bash",tool_input:{command:$c}}')"
+  run bash -c "CLAUDE_PLUGIN_ROOT='$fake_root' printf '%s' \"\$1\" | CLAUDE_PLUGIN_ROOT='$fake_root' bash '$HANDLER'" _ "$payload"
+  [ "$status" -eq 0 ]
+  # Should fall through to passthrough (no rules -> continue:true).
+  cont="$(jq -r '.continue' <<<"$output")"
+  [ "$cont" = "true" ]
+}
+
 # ---------------------------------------------------------------------------
 # Real-world round-trip
 # ---------------------------------------------------------------------------
