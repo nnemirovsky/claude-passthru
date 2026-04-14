@@ -131,6 +131,32 @@ setup() {
   [ "$output" = "10" ]
 }
 
+@test "hooks/hooks.json has exactly one SessionStart entry" {
+  run jq -r '.hooks.SessionStart | length' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+@test "hooks/hooks.json SessionStart command uses CLAUDE_PLUGIN_ROOT" {
+  run jq -r '.hooks.SessionStart[0].hooks[0].command' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'${CLAUDE_PLUGIN_ROOT}'* ]]
+  [[ "$output" == *'session-start.sh' ]]
+}
+
+@test "hooks/hooks.json SessionStart timeout is 5" {
+  # Short timeout: the handler is a few stat calls + a single jq, no rule load.
+  run jq -r '.hooks.SessionStart[0].hooks[0].timeout' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "5" ]
+}
+
+@test "hooks/hooks.json SessionStart handler script exists and is executable" {
+  local script="$REPO_ROOT/hooks/handlers/session-start.sh"
+  [ -f "$script" ]
+  [ -x "$script" ]
+}
+
 @test "README.md exists and is non-empty" {
   [ -f "$REPO_ROOT/README.md" ]
   [ -s "$REPO_ROOT/README.md" ]

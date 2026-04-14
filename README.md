@@ -35,7 +35,7 @@ More examples: shape-matching a `gh api` endpoint across any owner/repo pair, al
 * **Deny lists that win.** A matching deny rule unconditionally overrides any allow, so you can cement safety rules on top of a permissive allow set.
 * **Opt-in audit log.** JSONL record of every decision (including what the native dialog did for passthroughs). Off by default, zero overhead when disabled.
 * **Standalone verifier.** Validate every rule file from the command line or via `/passthru:verify` to catch bad JSON, invalid regex, and allow/deny conflicts before they silently disable rules.
-* **First-run bootstrap.** One-shot importer that converts existing native `permissions.allow` entries into passthru rules.
+* **First-run bootstrap.** One-shot `/passthru:bootstrap` command (or `scripts/bootstrap.sh` for scripting) that converts existing native `permissions.allow` entries into passthru rules. A one-time `SessionStart` hint points at it when there are importable entries.
 
 ## Commands
 
@@ -43,6 +43,7 @@ All commands are plugin-namespaced under `/passthru:`.
 
 | Command | What it does |
 | --- | --- |
+| `/passthru:bootstrap` | One-shot importer: reviews your existing `permissions.allow` entries, shows the proposed rules, asks to confirm, then writes `passthru.imported.json`. Runs the verifier afterwards. |
 | `/passthru:add` | Add a rule without hand-editing `passthru.json`. Supports `--deny` and `--field`. |
 | `/passthru:suggest` | Propose a generalized rule from a recent tool call in the conversation, then write it on confirmation. |
 | `/passthru:verify` | Validate every rule file. Surfaces parse errors, schema violations, invalid regex, duplicates, and allow/deny conflicts. |
@@ -84,9 +85,11 @@ Works across every tool Claude Code exposes (`Bash`, `PowerShell`, `Read`, `Edit
 
 ## First-run bootstrap
 
-The plugin ships a bootstrap script that converts existing native `permissions.allow` entries into passthru rule files. The script reads up to three settings files: the user-scope `~/.claude/settings.json`, the project-scope shared `./.claude/settings.json`, and the project-scope local `./.claude/settings.local.json`. Run it once after install to avoid starting from zero.
+The plugin ships a bootstrap importer that converts existing native `permissions.allow` entries into passthru rule files. It reads up to three settings files: the user-scope `~/.claude/settings.json`, the project-scope shared `./.claude/settings.json`, and the project-scope local `./.claude/settings.local.json`. Run it once after install to avoid starting from zero.
 
-Dry run first (prints proposed rules to stdout, writes nothing):
+**Recommended:** run `/passthru:bootstrap` inside a Claude Code session. It dry-runs first, shows the rules it would import, asks you to confirm, then writes and verifies. Use `--user-only` or `--project-only` to narrow the scope.
+
+**Non-interactive:** the same logic is available as a plain shell script for CI or ad-hoc use. Dry run first (prints proposed rules to stdout, writes nothing):
 
 ```
 bash ~/.claude/plugins/marketplaces/nnemirovsky/claude-passthru/scripts/bootstrap.sh
@@ -106,6 +109,8 @@ Bootstrap writes to dedicated imported files so hand-curated rules in `passthru.
 * `.claude/passthru.imported.json` (project scope)
 
 Re-running bootstrap overwrites the imported files. Edit `passthru.json` (the authored file) for hand-managed rules. Both files are merged at hook time.
+
+**One-time session hint.** The plugin also ships a `SessionStart` hook that detects when you have importable `permissions.allow` entries but no passthru rule files yet. On the first such session it prints a single-line hint to stderr pointing at `/passthru:bootstrap`, then records a marker at `~/.claude/passthru.bootstrap-hint-shown` so the hint never fires again. Delete that marker file to re-enable the hint.
 
 ## Rule format reference
 
