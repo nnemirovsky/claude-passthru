@@ -86,6 +86,10 @@ EOF
 parse_iso_to_epoch() {
   local iso="$1"
   local epoch=""
+  # Reject out-of-range years up front. ISO 8601 basic form uses YYYY
+  # (4 digits). GNU date accepts 5+ digit years; BSD date rejects them.
+  # Pin to 4-digit year for portability.
+  [[ "$iso" =~ ^[0-9]{4}- ]] || return 2
   # Accept either bare "...Z" or "...Z" with no fractional secs.
   if [ "$PASSTHRU_OS" = "Darwin" ]; then
     epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null || true)"
