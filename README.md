@@ -38,7 +38,7 @@ Native rules solve the common case. They fall short when:
 ## Install
 
 ```
-/plugin marketplace add nemirovsky/claude-passthru
+/plugin marketplace add nnemirovsky/claude-passthru
 /plugin install passthru
 ```
 
@@ -74,7 +74,7 @@ The plugin ships a bootstrap script that converts existing native `permissions.a
 Dry run first (prints proposed rules to stdout, writes nothing):
 
 ```
-bash ~/.claude/plugins/marketplaces/nemirovsky/claude-passthru/scripts/bootstrap.sh
+bash ~/.claude/plugins/marketplaces/nnemirovsky/claude-passthru/scripts/bootstrap.sh
 ```
 
 The exact path depends on where Claude Code installed the plugin. If you cloned the repo directly, the script lives at `scripts/bootstrap.sh` in your clone. Inspect the output, then re-run with `--write` to persist:
