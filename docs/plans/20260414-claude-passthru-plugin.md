@@ -11,7 +11,9 @@ Problem it solves:
 
 Integration: existing native rules in `~/.claude/settings.json` + `.claude/settings.local.json` are untouched. The hook runs first; if no passthru rule matches, execution passes through to native rules unchanged. A one-time bootstrap script seeds the passthru rule files from existing native allow lists so users do not start from zero. A dedicated verifier checks rule correctness (regex validity, schema, overlap, shadowing) across all scopes in one pass, invoked both manually via `/passthru:verify` and automatically after every LLM- or bootstrap-driven rule write.
 
-Slash commands are plugin-namespaced via the colon convention Claude Code uses (same as `/planning:make`, `/release-tools:new`, `/ticktock:ticktock`). File name `commands/<name>.md` is exposed as `/passthru:<name>`. Our commands: `/passthru:add`, `/passthru:suggest`, `/passthru:verify`.
+Slash commands are plugin-namespaced via the colon convention Claude Code uses (same as `/planning:make`, `/release-tools:new`, `/ticktock:ticktock`). File name `commands/<name>.md` is exposed as `/passthru:<name>`. Our commands: `/passthru:add`, `/passthru:suggest`, `/passthru:verify`, `/passthru:log`.
+
+Optional audit log: when the sentinel file `~/.claude/passthru.audit.enabled` exists, the plugin records every tool-call permission decision to `~/.claude/passthru-audit.log` as JSONL. The PreToolUse handler logs its own `allow` / `deny` / `passthrough` decisions; a companion PostToolUse handler classifies passthrough outcomes (native dialog) into `asked_allowed_once`, `asked_allowed_always`, `asked_denied_once`, `asked_denied_always`, or `asked_allowed_unknown` by diffing `settings.json` snapshots captured in a PreToolUse breadcrumb. Audit is **off by default** and imposes zero runtime cost when disabled (single `-e sentinel` check, then exit). `/passthru:log` renders the log as a filtered, colorized table and also toggles the sentinel via `--enable` / `--disable` / `--status`.
 
 ## Context (from discovery)
 
@@ -243,7 +245,36 @@ Implementation note: macOS ships BSD grep without `-P`. Implementation uses `per
 - [ ] emergency disable via sentinel file `~/.claude/passthru.disabled` (presence = disabled). Env vars are not reliably inherited by hook subprocesses; a sentinel file is unambiguous and survives across shell invocations.
 - [ ] **plugin self-allow:** before running user rules, hardcode an allow for the plugin's own scripts. Slash commands (`/passthru:add`, `/passthru:suggest`, `/passthru:verify`) shell out via `bash ${CLAUDE_PLUGIN_ROOT}/scripts/*.sh`, and those Bash tool calls go through the PreToolUse hook. Without this self-allow, every slash-command invocation would hit the native permission dialog. Regex: `^bash /.*/claude/plugins/.*/claude-passthru/scripts/[a-z-]+\.sh( |$)` (tool = `Bash`). This is baked into the hook handler, not the user's config, so it works out-of-the-box across all install paths with zero bootstrap step required. Include a bats test covering the self-allow path.
 - [ ] write bats tests (all end-to-end via stdin pipe, no "manual pipe-test" step - that test IS a bats test): deny match -> deny JSON, allow match -> allow JSON, no match -> `{"continue": true}`, deny priority over allow, malformed stdin -> `{"continue": true}` + stderr warning, disabled sentinel present -> `{"continue": true}`, plugin self-allow (synthetic `bash .../claude-passthru/scripts/verify.sh` payload -> allow), real-world Bash `gh api /repos/owner/repo/forks` fixture round-trip.
-- [ ] run tests - must pass before task 5.
+- [ ] + **optional audit log (PreToolUse side):** if sentinel `~/.claude/passthru.audit.enabled` exists, append one JSONL line per decision to `~/.claude/passthru-audit.log`. Audit is OFF by default; enabling is a single `touch`. Line schema:
+  ```json
+  {"ts":"<iso8601>","event":"allow|deny|passthrough","source":"passthru","tool":"<tool_name>","reason":"<rule reason or null>","rule_index":<int or null>,"pattern":"<tool or match-key regex summary or null>","tool_use_id":"<hook input id or null>"}
+  ```
+  Log write failures must NEVER block the tool call (fail open, diagnostic to stderr). Writes must be append-safe under concurrent hooks (open with O_APPEND via `>>`; a single JSONL line per `printf` is atomic below PIPE_BUF on POSIX).
+- [ ] + audit log breadcrumb (PreToolUse side): when audit is enabled AND the decision is `passthrough`, also write `$TMPDIR/passthru-pre-<tool_use_id>.json` with `{"ts":"...","tool":"<name>","tool_input":<obj>,"settings_sha_user":"<sha256 of ~/.claude/settings.json or null>","settings_sha_project":"<sha256 of .claude/settings.local.json or null>"}`. Consumed by Task 4b PostToolUse to classify the user's native-dialog outcome (asked_allowed_once/always, asked_denied_once/always). Breadcrumb is only written on passthrough (we don't need it when we decided ourselves). If `tool_use_id` is absent, skip the breadcrumb (we log the base passthrough event regardless).
+- [ ] + garbage-collect stale breadcrumbs: on every PreToolUse, unlink breadcrumb files older than 1 hour. Cheap find/stat check, bounded to the breadcrumb directory.
+- [ ] + bats tests for audit: audit disabled -> no log file written, no breadcrumb; audit enabled + allow match -> one JSONL line with correct fields, no breadcrumb; audit enabled + deny match -> one JSONL line, no breadcrumb; audit enabled + passthrough with tool_use_id -> one JSONL + one breadcrumb file; audit enabled + passthrough without tool_use_id -> JSONL but no breadcrumb; stale breadcrumb older than 1h is unlinked on next PreToolUse.
+- [ ] run tests - must pass before task 4b.
+
+### Task 4b: PostToolUse hook for native-dialog outcomes (audit log continued)
+
+**Files:**
+- Create: `/Users/nemirovsky/Developer/claude-passthru/hooks/handlers/post-tool-use.sh`
+- Modify: `/Users/nemirovsky/Developer/claude-passthru/hooks/hooks.json` (add PostToolUse entry, matcher `"*"`, timeout 2)
+- Create: `/Users/nemirovsky/Developer/claude-passthru/tests/post_hook_handler.bats`
+
+- [ ] + implement handler: read stdin JSON, extract `tool_name`, `tool_input`, `tool_use_id`, `tool_response`. If audit sentinel is absent -> exit 0 immediately (`{"continue": true}` on stdout), zero overhead in disabled mode.
+- [ ] + look up the breadcrumb at `$TMPDIR/passthru-pre-<tool_use_id>.json`. If absent (meaning PreToolUse decided allow/deny itself, or audit was disabled then), exit 0 silently - we already logged the decision PreToolUse side.
+- [ ] + classify outcome:
+  - tool_response missing or marked as permission-blocked -> `asked_denied_once` (note: Claude Code rarely persists deny decisions, so "denied always" is detected only if a new deny rule appeared in settings.json; otherwise default to "once"). Detect blocked via tool_response containing `permissionDenied: true` or similar indicator.
+  - tool_response present and successful -> compute current settings.json sha for both user and project scopes. Compare to breadcrumb's snapshots:
+    - user or project sha changed AND new permissions entry covers this tool call -> `asked_allowed_always`
+    - unchanged -> `asked_allowed_once`
+  - "new permissions entry covers this tool call" heuristic: diff the old vs new `permissions.allow` arrays, take the added entry, check if it's a substring/glob match for the current tool call. A rough heuristic; document the limitations. Never emit a wrong classification silently: on ambiguity, emit `asked_allowed_unknown` rather than guessing.
+- [ ] + write JSONL line to `~/.claude/passthru-audit.log`: `{"ts":"...","event":"asked_allowed_always|asked_allowed_once|asked_denied_always|asked_denied_once|asked_allowed_unknown","source":"native","tool":"<name>","tool_use_id":"<id>"}`. Same append-safe write semantics as PreToolUse.
+- [ ] + unlink the breadcrumb after processing (success or error). Never leave orphans.
+- [ ] + fail-open behaviour: any error in PostToolUse -> diagnostic to stderr, exit 0 with `{"continue": true}`. Audit failures must not affect tool outcomes.
+- [ ] + bats tests: breadcrumb -> tool_response success + settings unchanged = `asked_allowed_once`; settings changed with matching new rule = `asked_allowed_always`; settings changed with unrelated rule = `asked_allowed_unknown`; tool_response shows permission blocked = `asked_denied_once`; no breadcrumb = no-op; audit disabled = no-op regardless of breadcrumb (self-heal - unlink only); malformed breadcrumb -> stderr + no-op + unlink.
+- [ ] + run tests - must pass before task 5.
 
 ### Task 5: Rule verifier + atomic write wrapper
 
@@ -320,7 +351,34 @@ Atomic write wrapper (`write-rule.sh`):
 - [ ] include guidance: when the user edits `passthru.json` directly, they should run `/passthru:verify` to catch errors before the next tool call.
 - [ ] extend the shared frontmatter bats test to cover `verify.md`.
 - [ ] manually verify: pre-seed a passthru.json with an invalid regex, run `/passthru:verify`, confirm error is surfaced clearly; fix the regex, re-run, confirm `[OK]`.
-- [ ] run tests (bats) - must pass before task 9.
+- [ ] run tests (bats) - must pass before task 8b.
+
+### Task 8b: /passthru:log slash command + scripts/log.sh
+
+**Files:**
+- Create: `/Users/nemirovsky/Developer/claude-passthru/scripts/log.sh`
+- Create: `/Users/nemirovsky/Developer/claude-passthru/commands/log.md`
+- Create: `/Users/nemirovsky/Developer/claude-passthru/tests/log_script.bats`
+
+- [ ] + implement `scripts/log.sh`: reads `~/.claude/passthru-audit.log` (override path via `--file`), formats JSONL entries for human viewing.
+- [ ] + flags:
+  - `--since <value>`: filter by time. Accepts ISO 8601 (`2026-04-14T00:00:00Z`), relative (`1h`, `24h`, `7d`), or `today`.
+  - `--event <pattern>`: filter by event. Value is a regex matched against the `event` field. Examples: `allow`, `deny`, `^asked_`, `asked_allowed_(once|always)`.
+  - `--tool <pattern>`: regex against `tool` field.
+  - `--format table|json|raw`: default `table` (pretty columns, ANSI colors only when stdout is a tty), `json` emits the filtered entries as a JSON array, `raw` passes through JSONL unchanged.
+  - `--tail N`: show only the last N entries after filtering.
+  - `--enable`: touch `~/.claude/passthru.audit.enabled`, exit 0 after printing "audit enabled".
+  - `--disable`: rm the sentinel, exit 0 after printing "audit disabled".
+  - `--status`: print `enabled`/`disabled` and the log file path, exit 0.
+  - `--help`: short usage text.
+- [ ] + empty log / missing file -> print "no entries" to stderr, exit 0.
+- [ ] + table columns: time (local tz, `HH:MM:SS` if today, else `YYYY-MM-DD HH:MM`), event, source, tool, reason/detail. Truncate long reasons with ellipsis; full JSON is always available via `--format json` or `--format raw`.
+- [ ] + color scheme (tty only): green for `allow`/`asked_allowed_*`, red for `deny`/`asked_denied_*`, yellow for `passthrough`/`asked_allowed_unknown`.
+- [ ] + plain ASCII (no em-dashes, no fancy bullets). Use `|` column separators and ASCII box chars if any.
+- [ ] + `commands/log.md` slash command frontmatter: `description`, `argument-hint: "[--since 1h] [--event ...] [--tool ...] [--tail N] [--format table|json|raw] [--enable|--disable|--status]"`. Exposed as `/passthru:log`. Prompt body shells out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/log.sh $ARGUMENTS` and surfaces output.
+- [ ] + extend shared frontmatter bats test to cover `log.md`.
+- [ ] + bats tests for log.sh: empty/missing log -> "no entries"; mixed-event log + `--event allow` filter; `--since 1h` filters correctly against fixture timestamps; `--format json` emits valid JSON array; `--tail 2` returns last 2; `--enable` creates sentinel; `--disable` removes it; `--status` reports correctly in both states; bad `--since` value -> stderr + exit 2.
+- [ ] + run tests - must pass before task 9.
 
 ### Task 9: Bootstrap script (one-time import from native rules)
 
@@ -351,7 +409,21 @@ Atomic write wrapper (`write-rule.sh`):
 - Create: `/Users/nemirovsky/Developer/claude-passthru/docs/rule-format.md`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/docs/examples.md`
 
-- [ ] expand `README.md` to cover: what it does, why (motivating examples like the directory-prefix gap, the `gh api` regex use case), install, first-run bootstrap, rule format reference with examples, command reference (`/passthru:add`, `/passthru:suggest`, `/passthru:verify`), the verifier (`scripts/verify.sh` standalone invocation), troubleshooting, sentinel-file escape hatch (`touch ~/.claude/passthru.disabled`).
+- [ ] expand `README.md` to cover: what it does, why (motivating examples like the directory-prefix gap, the `gh api` regex use case), install, first-run bootstrap, rule format reference with examples, command reference (`/passthru:add`, `/passthru:suggest`, `/passthru:verify`, `/passthru:log`), the verifier (`scripts/verify.sh` standalone invocation), troubleshooting, sentinel-file escape hatch (`touch ~/.claude/passthru.disabled`).
+- [ ] + README must include a **"Requirements"** section listing runtime dependencies with install hints:
+  - `bash` (check actual minimum - 3.2 if code is 3.2-compatible, else 4.0+). macOS default is 3.2; Linux usually ships 4+. Verify the minimum against the scripts actually committed before pinning.
+  - `jq` 1.6+ - macOS: `brew install jq`, Debian/Ubuntu: `apt install jq`, RHEL/Fedora: `dnf install jq`.
+  - `perl` 5+ - preinstalled on macOS and most Linux distros; used as the PCRE backend because BSD grep on macOS lacks `-P`.
+  - `bats-core` 1.9+ - tests only; not required to run the plugin. macOS: `brew install bats-core`, Debian/Ubuntu: `apt install bats` (may be older; npm install preferred: `npm install -g bats`).
+  - Note PowerShell support: hook itself is Bash/perl only; PowerShell rule matching works because Claude Code still invokes the PreToolUse hook for `PowerShell` tool calls - no PowerShell runtime needed on the user's machine.
+- [ ] + README must include an **"Audit log"** section documenting:
+  - Audit is **opt-in and off by default**.
+  - Enable: `touch ~/.claude/passthru.audit.enabled` or `/passthru:log --enable`.
+  - Disable: `rm ~/.claude/passthru.audit.enabled` or `/passthru:log --disable`.
+  - Log path: `~/.claude/passthru-audit.log` (JSONL).
+  - Event types: `allow`, `deny`, `passthrough` (from PreToolUse) and `asked_allowed_once`, `asked_allowed_always`, `asked_denied_once`, `asked_denied_always`, `asked_allowed_unknown` (from PostToolUse, passthrough outcomes only).
+  - View: `/passthru:log` or `scripts/log.sh` directly; flags documented in the command help.
+  - Log rotation: none built in; use `logrotate` or manual truncation if the file grows. Document expected volume (one line per tool call when enabled).
 - [ ] README must include a **"Test locally"** section with the exact command for loading an uninstalled plugin directory:
 
   ```
@@ -391,6 +463,7 @@ Atomic write wrapper (`write-rule.sh`):
 - [ ] verify auto-verify on write: use `/passthru:add` with an invalid regex; confirm the write is rolled back by `write-rule.sh` and the user is told why.
 - [ ] run full test suite: `bats tests/*.bats`.
 - [ ] confirm no regressions: native `.claude/settings.local.json` rules still work untouched.
+- [ ] + audit log end-to-end: enable via `/passthru:log --enable`; run commands that exercise allow/deny/passthrough; confirm JSONL log entries land; verify `/passthru:log --event allow`, `--event '^asked_'`, `--since 1h`, `--tail 10`, and `--format json` each filter or render correctly. Disable via `/passthru:log --disable` and confirm no further entries are appended. Confirm `/passthru:log --status` reflects state.
 
 ### Task 12: Publish to GitHub with branch protection
 
