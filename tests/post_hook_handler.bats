@@ -547,6 +547,51 @@ write_settings() {
   [ "$output" = "asked_allowed_always" ]
 }
 
+@test "entry_matches_call: exact Bash(ls) does NOT classify 'ls -la' as tailored/always" {
+  enable_audit
+  # `Bash(ls)` in native permissions is an EXACT-command form. It covers
+  # only the literal command `ls` and must not be conflated with the
+  # prefix form `Bash(ls:*)`. A prior implementation stripped an optional
+  # `:*` tail and then prefix-matched unconditionally, so `Bash(ls)`
+  # wrongly classified a follow-up `ls -la` call as `asked_allowed_always`.
+  write_breadcrumb "tidLSEXACT" "Bash" '{"command":"ls -la"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["Bash(ls)"]' '[]'
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"tool_use_id":"tidLSEXACT","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  # The settings entry does not cover the call -> classify as unknown.
+  [ "$output" = "asked_allowed_unknown" ]
+}
+
+@test "entry_matches_call: exact Bash(ls) DOES match a call to literal 'ls'" {
+  enable_audit
+  # Positive case for the exact form: the command is exactly `ls` so the
+  # native `Bash(ls)` rule does cover it and we should classify as
+  # `asked_allowed_always`.
+  write_breadcrumb "tidLSEQ" "Bash" '{"command":"ls"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["Bash(ls)"]' '[]'
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tidLSEQ","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
+@test "entry_matches_call: prefix Bash(ls:*) still matches 'ls -la' (prefix form preserved)" {
+  enable_audit
+  # Regression guard for the exact-vs-prefix fix: the prefix form must
+  # continue to classify follow-up calls that start with the prefix as
+  # `asked_allowed_always`.
+  write_breadcrumb "tidLSPREFIX" "Bash" '{"command":"ls -la"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["Bash(ls:*)"]' '[]'
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"tool_use_id":"tidLSPREFIX","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
 @test "entry_matches_call: Read(/tmp/dir:*) prefix matches Read on /tmp/dir/file.txt" {
   enable_audit
   write_breadcrumb "tidRD" "Read" '{"file_path":"/tmp/dir/file.txt"}' "" ""

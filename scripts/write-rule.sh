@@ -135,20 +135,29 @@ fi
 
 # All subsequent cleanup runs via trap, covering early exits.
 BACKUP=""
+# STATE machine for the atomic-write protocol:
+#   NONE      no backup in play; nothing to restore.
+#   BACKED_UP backup taken but TARGET not yet mutated. Cleanup just drops
+#             BACKUP; TARGET is untouched.
+#   WRITING   mv TMPOUT TARGET has completed; TARGET now holds unverified
+#             content. Cleanup MUST restore BACKUP over TARGET before
+#             dropping it, otherwise a signal here leaves corrupted content
+#             on disk with no restore path (breaking the atomic guarantee).
+#   VERIFIED  verifier passed OR we finished the rollback branch ourselves.
+#             Cleanup only drops any leftover backup and exits.
+STATE="NONE"
 
 cleanup() {
   local rc=$?
+  # Order matters: restore before releasing the lock so a concurrent writer
+  # waiting on the lock never sees the half-written file.
+  if [ "$STATE" = "WRITING" ] && [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+    # Signal (or unexpected error) hit between `mv TMPOUT TARGET` and the
+    # verifier rollback branch. Roll TARGET back to the backup.
+    mv "$BACKUP" "$TARGET" 2>/dev/null || true
+    BACKUP=""
+  fi
   release_lock
-  # Drop any leftover backup. The two windows where BACKUP is non-empty are:
-  #   (a) between `cp -p TARGET BACKUP` and `mv TMPOUT TARGET` -- TARGET is
-  #       untouched in that window, so there is nothing to restore, just
-  #       clean up the temp file.
-  #   (b) any path that reaches this trap with BACKUP still set. The verifier
-  #       rollback branch always sets BACKUP="" after restoring, and the
-  #       success path does the same after rm. So (b) only fires if a signal
-  #       or unexpected error unwinds through one of those code blocks, in
-  #       which case the backup is still present and we err on the side of
-  #       leaving TARGET alone.
   if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
     rm -f "$BACKUP" 2>/dev/null || true
   fi
@@ -173,6 +182,7 @@ fi
 
 BACKUP="$(mktemp -t passthru-write.XXXXXX)"
 cp -p "$TARGET" "$BACKUP"
+STATE="BACKED_UP"
 
 # ---------------------------------------------------------------------------
 # Append the rule
@@ -193,9 +203,11 @@ NEW_CONTENT="$(
   exit 1
 }
 
-# Write atomically via mv-over.
+# Write atomically via mv-over. After this `mv`, TARGET holds unverified
+# content; the cleanup trap uses STATE to roll back on signal-based exits.
 TMPOUT="$(mktemp -t passthru-write-out.XXXXXX)"
 printf '%s\n' "$NEW_CONTENT" > "$TMPOUT"
+STATE="WRITING"
 mv "$TMPOUT" "$TARGET"
 
 # ---------------------------------------------------------------------------
@@ -212,6 +224,7 @@ if [ "$VERIFY_RC" -ne 0 ]; then
   # Restore backup atomically.
   mv "$BACKUP" "$TARGET"
   BACKUP=""
+  STATE="VERIFIED"
   printf 'write-rule.sh: verifier rejected new rule; rolled back\n' >&2
   if [ -n "$VERIFY_ERR" ]; then
     printf '%s\n' "$VERIFY_ERR" >&2
@@ -220,6 +233,7 @@ if [ "$VERIFY_RC" -ne 0 ]; then
 fi
 
 # Success: drop backup.
+STATE="VERIFIED"
 rm -f "$BACKUP"
 BACKUP=""
 exit 0

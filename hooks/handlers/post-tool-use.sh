@@ -200,23 +200,33 @@ entry_matches_call() {
 
   case "$tool_name" in
     Bash)
-      # Strip a literal ":*" tail (the native permissions glob suffix). Use
-      # a literal-asterisk glob so a single colon inside the entry (e.g.
-      # `mcp__git:status`) is preserved instead of being lopped off.
-      local prefix="${entry_arg%:\*}"
-      [ -z "$prefix" ] && return 1
-      # Extract the command string from the tool_input.
+      # Native `Bash(...)` permissions come in two flavors, and we must not
+      # conflate them:
+      #   Bash(ls:*)  -- prefix form; matches any command starting with `ls`
+      #                  followed by whitespace or end-of-string.
+      #   Bash(ls)    -- exact form; matches ONLY the literal command `ls`.
+      # The old implementation stripped an optional `:*` tail and then did a
+      # prefix-style match unconditionally, which made `Bash(ls)` classify
+      # `ls -la` as "always" even though the native rule only covers `ls`
+      # exactly.
+      [ -z "$entry_arg" ] && return 1
       local cmd
       cmd="$(jq -r '.command // ""' <<<"$tool_input" 2>/dev/null || echo '')"
       [ -z "$cmd" ] && return 1
-      # prefix may itself contain a space (e.g. "gh pr"). Accept when cmd
-      # equals prefix exactly, or starts with prefix followed by a space.
-      # The prefix match already covers the "bare command name" case: if
-      # prefix is "ls" and cmd is "ls", the first alternative matches; if
-      # cmd is "ls -la", the second matches.
-      case "$cmd" in
-        "$prefix"|"$prefix "*) return 0 ;;
-      esac
+      if [[ "$entry_arg" == *:\* ]]; then
+        # Prefix form. Strip the `:*` tail (use a literal-asterisk glob so
+        # single colons inside the entry, e.g. `foo:bar`, are preserved).
+        local prefix="${entry_arg%:\*}"
+        [ -z "$prefix" ] && return 1
+        # prefix may itself contain a space (e.g. "gh pr"). Accept when cmd
+        # equals prefix exactly, or starts with prefix followed by a space.
+        case "$cmd" in
+          "$prefix"|"$prefix "*) return 0 ;;
+        esac
+        return 1
+      fi
+      # Exact form: full command must equal entry_arg verbatim.
+      [ "$cmd" = "$entry_arg" ] && return 0
       return 1
       ;;
     WebFetch)

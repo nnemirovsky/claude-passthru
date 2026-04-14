@@ -106,7 +106,7 @@ run_boot() {
   # MCP exact
   [[ "$output" == *'"tool": "^mcp__context7__query\\-docs$"'* ]]
   # WebFetch stricter domain regex
-  [[ "$output" == *'"url": "^https?://([^/.]+\\.)*x\\.com(/|$)"'* ]]
+  [[ "$output" == *'"url": "^https?://([^/.]+\\.)*x\\.com([/:?#]|$)"'* ]]
   # Unknown formats warning on stderr (run merges stderr in bats by default when run with 2>&1).
 }
 
@@ -239,6 +239,44 @@ JSON
   run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://evilx.com/anything' "$pat"
   [ "$status" -ne 0 ]
   run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://sub.evilx.com/' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap: WebFetch(domain:x.com) matches same-host URL with query/fragment/port (regex trailing anchors)" {
+  # The native `WebFetch(domain:x.com)` rule covers the host regardless of
+  # what follows in the URL. The converted regex's trailing anchor must
+  # therefore accept every legal URL delimiter that can follow the host:
+  # `/` (path), `?` (query), `#` (fragment), `:` (port), or end-of-string.
+  # An older `(/|$)` anchor rejected `https://x.com?foo=1` and `#frag`,
+  # making the migration lossy vs the native rule.
+  printf '{"permissions":{"allow":["WebFetch(domain:x.com)"]}}\n' > "$PROJ_ROOT/.claude/settings.local.json"
+  run_boot --write
+  [ "$status" -eq 0 ]
+  pat="$(jq -r '.allow[0].match.url' "$(proj_imported)")"
+  # Plain host
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://x.com' "$pat"
+  [ "$status" -eq 0 ]
+  # Host with query
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://x.com?foo=1' "$pat"
+  [ "$status" -eq 0 ]
+  # Host with fragment
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://x.com#frag' "$pat"
+  [ "$status" -eq 0 ]
+  # Host with explicit port
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://x.com:8443/api' "$pat"
+  [ "$status" -eq 0 ]
+  # Host with trailing path and query together
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://x.com/a?b=1#c' "$pat"
+  [ "$status" -eq 0 ]
+  # Must STILL NOT match `evilx.com` variants (regression guard for the
+  # `([^/.]+\\.)*` boundary check).
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://evilx.com?foo=1' "$pat"
+  [ "$status" -ne 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://evilx.com#frag' "$pat"
+  [ "$status" -ne 0 ]
+  # And must still not match a host that merely starts with `x.com` followed
+  # by more label chars (e.g. `x.com.attacker.net` under the naive anchor).
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'https://x.comattacker.net/' "$pat"
   [ "$status" -ne 0 ]
 }
 

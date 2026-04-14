@@ -263,3 +263,117 @@ EOF
   AFTER="$(cat "$(user_file)")"
   [ "$ORIG" = "$AFTER" ]
 }
+
+# ---------------------------------------------------------------------------
+# Signal safety: signal arriving after mv-to-target but before verifier
+# rollback must leave TARGET byte-identical to the pre-write content.
+# ---------------------------------------------------------------------------
+
+@test "write-rule: SIGTERM between mv-target and verifier -> TARGET rolled back, no corrupt content" {
+  # Reproduce the exact atomic-write vulnerability window described in the
+  # cleanup() STATE machine: after `mv TMPOUT TARGET` has replaced the
+  # file, but BEFORE the verifier has returned and the `if VERIFY_RC -ne 0`
+  # rollback branch has run. A signal caught in that window with a naive
+  # EXIT-trap cleanup() would simply `rm BACKUP` and leave TARGET holding
+  # unverified content with no restore path.
+  #
+  # To make the window deterministic, we work on an instrumented copy of
+  # write-rule.sh that inserts a `sleep` between `mv` and the verifier
+  # invocation. An external killer signals the write process during that
+  # sleep. The underlying bug and fix are unchanged; the instrumentation
+  # only widens a window that would otherwise race in microseconds.
+  FAKE_ROOT="$TMP/fake-plugin-root"
+  mkdir -p "$FAKE_ROOT/hooks" "$FAKE_ROOT/scripts"
+  cp "$REPO_ROOT/hooks/common.sh" "$FAKE_ROOT/hooks/common.sh"
+  # verify.sh under the fake root is a no-op success; the signal is
+  # injected from the outside so we do not depend on verify's behavior.
+  cat > "$FAKE_ROOT/scripts/verify.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKE_ROOT/scripts/verify.sh"
+
+  # Instrumented copy of write-rule.sh with a sleep inserted right after
+  # `mv TMPOUT TARGET` to widen the post-mv / pre-verify window.
+  INSTR_WRITE="$TMP/write-rule-instr.sh"
+  awk '
+    /^mv "\$TMPOUT" "\$TARGET"$/ { print; print "sleep 0.6"; next }
+    { print }
+  ' "$WRITE" > "$INSTR_WRITE"
+  chmod +x "$INSTR_WRITE"
+  # Sanity: make sure the sleep actually landed.
+  grep -q '^sleep 0.6$' "$INSTR_WRITE"
+
+  # Seed a valid baseline TARGET.
+  cat > "$(user_file)" <<'EOF'
+{"version":1,"allow":[{"tool":"Bash","match":{"command":"^original"}}],"deny":[]}
+EOF
+  ORIG="$(cat "$(user_file)")"
+
+  # Launch write-rule.sh in the background, schedule a SIGTERM mid-sleep.
+  CLAUDE_PLUGIN_ROOT="$FAKE_ROOT" \
+    bash "$INSTR_WRITE" user allow '{"tool":"Bash","match":{"command":"^injected"}}' >/dev/null 2>&1 &
+  wpid=$!
+  (sleep 0.3; kill -TERM "$wpid" 2>/dev/null || true) &
+  killer_pid=$!
+
+  set +e
+  wait "$wpid"
+  wrc=$?
+  set -e
+  wait "$killer_pid" 2>/dev/null || true
+
+  # Process must have exited non-zero (signal-driven exit).
+  [ "$wrc" -ne 0 ]
+
+  # Strongest assertion: file content restored byte-for-byte. Without the
+  # STATE machine in cleanup(), BACKUP was rm'd and TARGET would still
+  # hold the `^injected` rule here.
+  AFTER="$(cat "$(user_file)")"
+  [ "$ORIG" = "$AFTER" ]
+}
+
+@test "write-rule: SIGTERM on a missing-target write -> skeleton preserved (no partial rule)" {
+  # Same signal-injection technique, but on a first-write (no pre-existing
+  # target). The skeleton `{"version":1,"allow":[],"deny":[]}` gets laid
+  # down before the append, so the backup holds the skeleton and rollback
+  # restores it rather than the injected rule.
+  FAKE_ROOT="$TMP/fake-plugin-root-2"
+  mkdir -p "$FAKE_ROOT/hooks" "$FAKE_ROOT/scripts"
+  cp "$REPO_ROOT/hooks/common.sh" "$FAKE_ROOT/hooks/common.sh"
+  cat > "$FAKE_ROOT/scripts/verify.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKE_ROOT/scripts/verify.sh"
+
+  INSTR_WRITE="$TMP/write-rule-instr-2.sh"
+  awk '
+    /^mv "\$TMPOUT" "\$TARGET"$/ { print; print "sleep 0.6"; next }
+    { print }
+  ' "$WRITE" > "$INSTR_WRITE"
+  chmod +x "$INSTR_WRITE"
+
+  [ ! -f "$(user_file)" ]
+
+  CLAUDE_PLUGIN_ROOT="$FAKE_ROOT" \
+    bash "$INSTR_WRITE" user allow '{"tool":"Bash","match":{"command":"^shouldnotland"}}' >/dev/null 2>&1 &
+  wpid=$!
+  (sleep 0.3; kill -TERM "$wpid" 2>/dev/null || true) &
+  killer_pid=$!
+
+  set +e
+  wait "$wpid"
+  wrc=$?
+  set -e
+  wait "$killer_pid" 2>/dev/null || true
+
+  [ "$wrc" -ne 0 ]
+
+  # The skeleton survives; the injected rule does not. Skeleton is created
+  # before the backup/mv cycle starts, so BACKUP holds the skeleton and the
+  # STATE-aware cleanup restores it.
+  [ -f "$(user_file)" ]
+  run jq -e '.version == 1 and (.allow | length == 0) and (.deny | length == 0)' "$(user_file)"
+  [ "$status" -eq 0 ]
+}

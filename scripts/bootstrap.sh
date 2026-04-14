@@ -15,7 +15,7 @@
 #   Bash(<exact command>)     -> {tool:"Bash", match:{command:"^<escaped>$"}}
 #   mcp__server__tool         -> {tool:"^mcp__server__tool$"}
 #   WebFetch(domain:x.com)    -> {tool:"WebFetch",
-#                                 match:{url:"^https?://([^/.]+\\.)*x\\.com(/|$)"}}
+#                                 match:{url:"^https?://([^/.]+\\.)*x\\.com([/:?#]|$)"}}
 #
 # Unknown shapes (rules with spaces past the prefix, unrecognized forms) are
 # skipped with a warning printed to stderr.
@@ -207,10 +207,15 @@ convert_rule() {
     fi
     local escaped_domain
     escaped_domain="$(domain_escape "$domain")"
-    # Stricter regex: require that the host is either exactly `domain` or
-    # ends with `.domain`. Prevents `evilx.com` matching `x.com`.
+    # Require the host to be exactly `domain` or to end with `.domain` (so
+    # `evilx.com` cannot match a rule for `x.com`). The trailing character
+    # class admits every URL delimiter that can legally follow the host in
+    # RFC 3986 authority syntax: `/` (path), `:` (port), `?` (query),
+    # `#` (fragment), or end-of-string. The old `(/|$)` form rejected
+    # same-host URLs like `https://x.com?foo=1` and `https://x.com#frag`
+    # which the native `WebFetch(domain:x.com)` rule does cover.
     json="$(jq -cn \
-      --arg url "^https?://([^/.]+\\.)*${escaped_domain}(/|\$)" \
+      --arg url "^https?://([^/.]+\\.)*${escaped_domain}([/:?#]|\$)" \
       '{tool:"WebFetch", match:{url:$url}, reason:"imported from settings"}')"
 
   elif [[ "$raw" == WebFetch\(*\) ]]; then
