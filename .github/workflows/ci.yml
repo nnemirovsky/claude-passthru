@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: bats tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats-core and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats jq perl
+
+      - name: Run bats tests
+        run: bats tests/*.bats
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on hooks
+        run: |
+          shellcheck --severity=error hooks/common.sh
+          shellcheck --severity=error hooks/handlers/*.sh
+
+      - name: Run shellcheck on scripts
+        run: shellcheck --severity=error scripts/*.sh
