@@ -194,8 +194,11 @@ teardown() {
   ]'
   run find_first_match "$rules" "Bash" '{"command":"ls -la"}'
   [ "$status" -eq 0 ]
-  # Expect the second rule (index 1), not the third - first match wins.
-  run jq -r '.reason' <<<"$output"
+  # Output format is "<index>\t<rule-json>". Split with bash parameter expansion.
+  idx="${output%%$'\t'*}"
+  rule="${output#*$'\t'}"
+  [ "$idx" = "1" ]
+  run jq -r '.reason' <<<"$rule"
   [ "$output" = "ls rule" ]
 }
 
@@ -237,7 +240,8 @@ teardown() {
   ]'
   run find_first_match "$rules" "Read" '{"file_path":"/tmp/foo.txt"}'
   [ "$status" -eq 0 ]
-  run jq -r '.reason' <<<"$output"
+  rule="${output#*$'\t'}"
+  run jq -r '.reason' <<<"$rule"
   [ "$output" = "tmp" ]
 }
 
@@ -245,7 +249,8 @@ teardown() {
   rules='[{"tool":"WebFetch","match":{"url":"^https://docs\\.anthropic\\.com/"},"reason":"anthropic"}]'
   run find_first_match "$rules" "WebFetch" '{"url":"https://docs.anthropic.com/claude/reference"}'
   [ "$status" -eq 0 ]
-  run jq -r '.reason' <<<"$output"
+  rule="${output#*$'\t'}"
+  run jq -r '.reason' <<<"$rule"
   [ "$output" = "anthropic" ]
 }
 
@@ -253,7 +258,8 @@ teardown() {
   rules='[{"tool":"^mcp__gemini-cli__","reason":"gemini family"}]'
   run find_first_match "$rules" "mcp__gemini-cli__ask-gemini" '{"prompt":"hi"}'
   [ "$status" -eq 0 ]
-  run jq -r '.reason' <<<"$output"
+  rule="${output#*$'\t'}"
+  run jq -r '.reason' <<<"$rule"
   [ "$output" = "gemini family" ]
 }
 
@@ -261,10 +267,57 @@ teardown() {
   rules='[{"tool":"Bash","match":{"command":"^gh api","description":"forks"},"reason":"forks"}]'
   run find_first_match "$rules" "Bash" '{"command":"gh api /repos/foo/bar/forks","description":"list forks"}'
   [ "$status" -eq 0 ]
-  run jq -r '.reason' <<<"$output"
+  rule="${output#*$'\t'}"
+  run jq -r '.reason' <<<"$rule"
   [ "$output" = "forks" ]
 
   run find_first_match "$rules" "Bash" '{"command":"gh api /repos/foo/bar/branches","description":"list branches"}'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "find_first_match: returns the matched rule's index in TAB-prefix" {
+  # A rule list where the third entry matches; index should be 2.
+  rules='[
+    {"tool":"Bash","match":{"command":"^rm"}},
+    {"tool":"Bash","match":{"command":"^cat"}},
+    {"tool":"Bash","match":{"command":"^echo"}}
+  ]'
+  run find_first_match "$rules" "Bash" '{"command":"echo hi"}'
+  [ "$status" -eq 0 ]
+  idx="${output%%$'\t'*}"
+  [ "$idx" = "2" ]
+}
+
+# ---------------------------------------------------------------------------
+# match_rule: jq injection guard via crafted match-key names
+# ---------------------------------------------------------------------------
+
+@test "match_rule: match key containing a double-quote is handled safely" {
+  # A rule whose match-key name contains characters (here a quote) that
+  # would have broken the older "interpolate-into-jq-program" code. The
+  # rule must be evaluated as a normal field lookup, not crash, not
+  # silently flip semantics.
+  rule='{"tool":"Bash","match":{"weird\"key":"^ls$"}}'
+  # Tool input has the SAME exotic key name with the matching value.
+  run match_rule "Bash" '{"weird\"key":"ls"}' "$rule"
+  [ "$status" -eq 0 ]
+  # And the not-match path: same rule, different field value.
+  run match_rule "Bash" '{"weird\"key":"rm"}' "$rule"
+  [ "$status" -eq 1 ]
+  # Missing field -> no match (rule fails).
+  run match_rule "Bash" '{"other":"ls"}' "$rule"
+  [ "$status" -eq 1 ]
+}
+
+@test "match_rule: match key containing a dot does not get path-interpreted by jq" {
+  # `a.b` historically interpolated into jq as `.a.b` (a path lookup),
+  # not `."a.b"` (a single-key lookup). With --arg the key is treated
+  # literally regardless of interior dots.
+  rule='{"tool":"Bash","match":{"a.b":"^x$"}}'
+  run match_rule "Bash" '{"a.b":"x"}' "$rule"
+  [ "$status" -eq 0 ]
+  # And confirm `{"a":{"b":"x"}}` does NOT match (we want literal-key, not path).
+  run match_rule "Bash" '{"a":{"b":"x"}}' "$rule"
+  [ "$status" -eq 1 ]
 }

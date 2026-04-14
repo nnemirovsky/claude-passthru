@@ -21,6 +21,10 @@
 
 set -euo pipefail
 
+# Cache the OS once - we branch on Darwin vs Linux date semantics ~5 places
+# below, and a fresh `uname -s` fork each call adds up across long log files.
+PASSTHRU_OS="$(uname -s)"
+
 # ---------------------------------------------------------------------------
 # Path helpers (mirror hook handlers)
 # ---------------------------------------------------------------------------
@@ -74,7 +78,7 @@ parse_iso_to_epoch() {
   local iso="$1"
   local epoch=""
   # Accept either bare "...Z" or "...Z" with no fractional secs.
-  if [ "$(uname -s)" = "Darwin" ]; then
+  if [ "$PASSTHRU_OS" = "Darwin" ]; then
     epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null || true)"
   else
     epoch="$(date -u -d "$iso" +%s 2>/dev/null || true)"
@@ -93,7 +97,7 @@ compute_cutoff() {
   case "$raw" in
     today)
       # Local midnight today in epoch.
-      if [ "$(uname -s)" = "Darwin" ]; then
+      if [ "$PASSTHRU_OS" = "Darwin" ]; then
         date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) 00:00:00" +%s 2>/dev/null \
           || return 2
       else
@@ -167,7 +171,7 @@ color_for_event() {
 iso_to_local_display() {
   local iso="$1" today="$2"
   local epoch local_date short_date
-  if [ "$(uname -s)" = "Darwin" ]; then
+  if [ "$PASSTHRU_OS" = "Darwin" ]; then
     epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null || true)"
   else
     epoch="$(date -u -d "$iso" +%s 2>/dev/null || true)"
@@ -176,19 +180,19 @@ iso_to_local_display() {
     printf '%s' "$iso"
     return 0
   fi
-  if [ "$(uname -s)" = "Darwin" ]; then
+  if [ "$PASSTHRU_OS" = "Darwin" ]; then
     local_date="$(date -j -r "$epoch" +%Y-%m-%d 2>/dev/null || echo '')"
   else
     local_date="$(date -d "@$epoch" +%Y-%m-%d 2>/dev/null || echo '')"
   fi
   if [ "$local_date" = "$today" ]; then
-    if [ "$(uname -s)" = "Darwin" ]; then
+    if [ "$PASSTHRU_OS" = "Darwin" ]; then
       date -j -r "$epoch" +'%H:%M:%S' 2>/dev/null || printf '%s' "$iso"
     else
       date -d "@$epoch" +'%H:%M:%S' 2>/dev/null || printf '%s' "$iso"
     fi
   else
-    if [ "$(uname -s)" = "Darwin" ]; then
+    if [ "$PASSTHRU_OS" = "Darwin" ]; then
       short_date="$(date -j -r "$epoch" +'%Y-%m-%d %H:%M' 2>/dev/null || echo '')"
     else
       short_date="$(date -d "@$epoch" +'%Y-%m-%d %H:%M' 2>/dev/null || echo '')"
@@ -247,17 +251,31 @@ filter_stream() {
     fi
     # Event regex
     if [ -n "$event_re" ]; then
-      local ev
+      local ev rc
       ev="$(jq -r '.event // ""' <<<"$parsed" 2>/dev/null || echo '')"
-      if ! perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$ev" "$event_re" 2>/dev/null; then
+      perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$ev" "$event_re" 2>/dev/null
+      rc=$?
+      # Perl's die on bad regex exits 255; treat as a hard error rather than
+      # a silent "no match" so users see why their filter found nothing.
+      if [ "$rc" -ge 2 ]; then
+        printf '[passthru log] invalid --event regex: %s\n' "$event_re" >&2
+        return 2
+      fi
+      if [ "$rc" -ne 0 ]; then
         continue
       fi
     fi
     # Tool regex
     if [ -n "$tool_re" ]; then
-      local t
+      local t rc
       t="$(jq -r '.tool // ""' <<<"$parsed" 2>/dev/null || echo '')"
-      if ! perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$t" "$tool_re" 2>/dev/null; then
+      perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$t" "$tool_re" 2>/dev/null
+      rc=$?
+      if [ "$rc" -ge 2 ]; then
+        printf '[passthru log] invalid --tool regex: %s\n' "$tool_re" >&2
+        return 2
+      fi
+      if [ "$rc" -ne 0 ]; then
         continue
       fi
     fi
@@ -266,10 +284,12 @@ filter_stream() {
 }
 
 # tail_stream <n>: emit only the last n lines.
+# n is validated as a positive integer at flag-parse time. We still defend
+# against direct callers passing 0 / empty by emitting nothing rather than
+# the entire stream (which would be the surprising opposite of "tail").
 tail_stream() {
   local n="$1"
-  if [ -z "$n" ] || [ "$n" -le 0 ] 2>/dev/null; then
-    cat
+  if [ -z "$n" ] || ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -eq 0 ]; then
     return 0
   fi
   tail -n "$n"
@@ -332,8 +352,10 @@ render_table() {
 }
 
 render_json() {
-  # Slurp JSONL into an array. Empty input -> empty array.
-  jq -s '.' 2>/dev/null || printf '[]\n'
+  # Slurp validated JSONL into an array. Empty input -> empty array.
+  # Filtering already canonicalizes each line via jq -c, so jq -s here cannot
+  # fail in practice. No fallback path needed.
+  jq -s '.'
 }
 
 render_raw() {
@@ -389,6 +411,10 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || { printf '[passthru log] --tail requires N\n' >&2; exit 2; }
       if ! [[ "$2" =~ ^[0-9]+$ ]]; then
         printf '[passthru log] --tail N must be a non-negative integer\n' >&2
+        exit 2
+      fi
+      if [ "$2" -eq 0 ]; then
+        printf '[passthru log] --tail must be > 0 (use omit-flag to see all entries)\n' >&2
         exit 2
       fi
       ARG_TAIL="$2"
@@ -478,7 +504,14 @@ fi
 
 # Filter then tail then render. Everything is a pipeline so we never buffer the
 # full file if we can help it.
-FILTERED="$(filter_stream "$CUTOFF" "$ARG_EVENT" "$ARG_TOOL" <"$LOG_PATH")"
+# Capture exit code so a bad --event/--tool regex (filter_stream returns 2)
+# surfaces as exit 2 to the caller.
+FILTERED=""
+filter_rc=0
+FILTERED="$(filter_stream "$CUTOFF" "$ARG_EVENT" "$ARG_TOOL" <"$LOG_PATH")" || filter_rc=$?
+if [ "$filter_rc" -ne 0 ]; then
+  exit "$filter_rc"
+fi
 
 if [ -z "$FILTERED" ]; then
   printf 'no entries\n' >&2

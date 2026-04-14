@@ -326,6 +326,22 @@ EOF
   [ "$output" = "tSA" ]
 }
 
+@test "audit_write_line fails open: unwritable log dir does not block decision" {
+  # Make the audit dir unwritable (chmod 555). The hook should still emit
+  # its allow JSON and exit 0. The audit log itself will be empty/missing.
+  place "$USER_ROOT/.claude/passthru.json" "user-only.json"
+  enable_audit
+  chmod 555 "$USER_ROOT/.claude" 2>/dev/null || skip "cannot chmod test dir"
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"tool_use_id":"tFAIL"}'
+  # Restore so teardown can rm -rf.
+  chmod 755 "$USER_ROOT/.claude" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  out="$output"
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$out" 2>/dev/null || true)"
+  # Decision must still be allow even though the audit write failed.
+  [ "$decision" = "allow" ]
+}
+
 @test "audit log lines are valid JSONL (each line parses)" {
   place "$USER_ROOT/.claude/passthru.json" "user-only.json"
   enable_audit
@@ -342,4 +358,36 @@ EOF
   # And we got exactly three lines.
   n="$(wc -l < "$(audit_log)" | tr -d ' ')"
   [ "$n" -eq 3 ]
+}
+
+@test "audit log: full schema check on allow line (.ts ISO, .rule_index int, .pattern non-empty)" {
+  place "$USER_ROOT/.claude/passthru.json" "user-only.json"
+  enable_audit
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"tool_use_id":"schema-allow"}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  # ts is ISO 8601 Z form: YYYY-MM-DDTHH:MM:SSZ.
+  ts="$(jq -r '.ts' <<<"$line")"
+  [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  # rule_index is an integer (or null for self-allow). For an allow rule from
+  # the user-only fixture it should be an integer >= 0.
+  ridx_type="$(jq -r '.rule_index | type' <<<"$line")"
+  [ "$ridx_type" = "number" ]
+  # pattern is non-empty when the rule matched.
+  pat="$(jq -r '.pattern' <<<"$line")"
+  [ -n "$pat" ]
+  [ "$pat" != "null" ]
+}
+
+@test "audit log: passthrough line has null rule_index and null pattern" {
+  place "$USER_ROOT/.claude/passthru.json" "user-only.json"
+  enable_audit
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"unknown xyz"},"tool_use_id":"schema-pt"}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  ev="$(jq -r '.event' <<<"$line")"
+  [ "$ev" = "passthrough" ]
+  [ "$(jq -r '.rule_index' <<<"$line")" = "null" ]
+  [ "$(jq -r '.pattern' <<<"$line")" = "null" ]
+  [ "$(jq -r '.reason' <<<"$line")" = "null" ]
 }

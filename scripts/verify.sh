@@ -423,15 +423,23 @@ build_merged_list() {
 
 check_shadowing_in_list() {
   # $1 = list name (for message), $2 = merged JSON array
+  # Build canonical identity strings for every entry once (one jq fork per
+  # rule), then compare by index. Old behaviour was O(N^2) jq forks; this is
+  # O(N) jq forks plus O(N^2) bash string compares (cheap).
   local list="$1" arr="$2"
   local n
   n="$(jq -r 'length' <<<"$arr")"
-  local i j canon_i canon_j
+  [ "$n" -le 1 ] && return 0
+
+  local i j
+  local canon_arr=()
+  for ((i = 0; i < n; i++)); do
+    canon_arr[$i]="$(jq -c ".[$i]" <<<"$arr" | canon_rule)"
+  done
+
   for ((i = 1; i < n; i++)); do
-    canon_i="$(jq -c ".[$i]" <<<"$arr" | canon_rule)"
     for ((j = 0; j < i; j++)); do
-      canon_j="$(jq -c ".[$j]" <<<"$arr" | canon_rule)"
-      if [ "$canon_i" = "$canon_j" ]; then
+      if [ "${canon_arr[$i]}" = "${canon_arr[$j]}" ]; then
         diag warn "(merged-$list)" ".${list}[${i}]" "$i" \
           "shadowing: rule $i shadowed by earlier identical rule at index $j"
         break

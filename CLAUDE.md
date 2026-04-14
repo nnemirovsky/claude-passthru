@@ -115,6 +115,28 @@ Checks performed (in order, across the merged set):
 5. **conflict** - identical `tool + match` appears in both `allow[]` and `deny[]` (merged) emits an error.
 6. **shadowing** - within one merged `allow[]` or `deny[]` array, a later rule duplicates an earlier one. Warning.
 
+## Write-wrapper locking
+
+`scripts/write-rule.sh` (also called by `bootstrap.sh --write` and the
+`/passthru:add`, `/passthru:suggest` commands) serializes concurrent writers
+via a single user-scope lock at `~/.claude/passthru.write.lock`. Two backends
+exist:
+
+* **flock** when the binary is on `$PATH` (Linux distros, macOS via Homebrew).
+  Uses `flock -w "$LOCK_TIMEOUT" 9` against the lockfile.
+* **mkdir fallback** otherwise (default macOS install). Uses
+  `~/.claude/passthru.write.lock.d` as an atomic directory marker, polling at
+  100 ms intervals.
+
+The lock-acquisition timeout is 5 seconds by default and is configurable via
+`PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment. Both
+`tests/write_rule.bats` (concurrent test, lock-timeout test) and the
+production write paths exercise the env override.
+
+The lock file lives under the **user** scope even for project-scope writes
+because it is the single per-user serialization point across concurrent
+project shells.
+
 ## Releases
 
 Use the `release-tools:new` skill (`/release-tools:new`) to cut a new release. The skill handles version calculation, the GitHub release, and the description prompt.

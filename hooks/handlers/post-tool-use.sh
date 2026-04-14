@@ -49,45 +49,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Helpers (mirror pre-tool-use.sh; kept local so the two handlers stay
-# independent and easy to reason about without a third shared file)
+# Helpers
 # ---------------------------------------------------------------------------
-
-passthru_user_home() {
-  printf '%s\n' "${PASSTHRU_USER_HOME:-$HOME}"
-}
-
-passthru_tmpdir() {
-  printf '%s\n' "${TMPDIR:-/tmp}"
-}
-
-passthru_iso_ts() {
-  date -u +%Y-%m-%dT%H:%M:%SZ
-}
-
-passthru_sha256() {
-  local path="$1"
-  [ -f "$path" ] || return 0
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$path" 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" 2>/dev/null | awk '{print $1}'
-  fi
-}
-
-audit_enabled() {
-  local sentinel
-  sentinel="$(passthru_user_home)/.claude/passthru.audit.enabled"
-  [ -e "$sentinel" ]
-}
-
-audit_log_path() {
-  printf '%s/.claude/passthru-audit.log\n' "$(passthru_user_home)"
-}
-
-emit_passthrough() {
-  printf '{"continue": true}\n'
-}
+# passthru_user_home, passthru_tmpdir, passthru_iso_ts, passthru_sha256,
+# sanitize_tool_use_id, audit_enabled, audit_log_path, emit_passthrough
+# all live in common.sh. Defined here only when not provided by an older
+# common.sh checkout (paranoia for sourced library staleness).
 
 # write_post_event <event> <tool_name> <tool_use_id>
 # Appends one JSONL line to the audit log. Fail-open (never propagates errors).
@@ -124,15 +91,18 @@ write_post_event() {
 # Accepts several shapes Claude Code has been observed to emit for a
 # permission-denied outcome. Rather than pin to one schema, we treat any
 # of the following as "denied":
-#   - tool_response is literally null or the literal string "null"
+#   - tool_response is the literal string "null" (explicit null payload)
 #   - tool_response.permissionDenied is true
-#   - tool_response.error contains a "permission" substring
-#   - tool_response.interrupted / isError with a permission hint
+#   - tool_response.error matches a permission/denied/blocked anchored token
 #   - tool_response.status == "denied" or "permission_denied"
+# Empty / missing tool_response is NOT classified as denied (no signal).
 # Returns 0 when denied, 1 otherwise.
 is_denied_response() {
   local resp="$1"
-  [ -z "$resp" ] && return 0
+  # Empty payload: no signal at all. Treat as not-denied so we do not promote
+  # ambiguous outcomes (e.g. background tools without a structured response)
+  # into asked_denied_*.
+  [ -z "$resp" ] && return 1
   if [ "$resp" = "null" ]; then
     return 0
   fi
@@ -143,10 +113,14 @@ is_denied_response() {
     return 0
   fi
   # Error messages carrying a permission marker.
+  # Anchored tokens (whole word + boundary) so unrelated phrases like
+  # "Updated file permissions to 0644" do not flip into a deny classification.
   local err status
   err="$(jq -r '(.error // .errorMessage // .message // "") | tostring' <<<"$resp" 2>/dev/null || echo '')"
-  if printf '%s' "$err" | grep -qiE 'permission|denied|blocked|not allowed'; then
-    return 0
+  if [ -n "$err" ]; then
+    if printf '%s' "$err" | grep -qiE '(permission[- ]?denied|access[- ]?denied|not[- ]?allowed|\bblocked\b|\bdenied\b)'; then
+      return 0
+    fi
   fi
   status="$(jq -r '.status // .state // ""' <<<"$resp" 2>/dev/null || echo '')"
   case "$status" in
@@ -157,13 +131,15 @@ is_denied_response() {
   return 1
 }
 
-# entries_look_tailored <old_allow_json> <new_allow_json> <tool_name> <tool_input_json>
-# Returns 0 if any entry added to new_allow (relative to old_allow) looks
-# plausibly tied to the given tool call. Because we only persisted a sha in
-# the breadcrumb, we use a simple heuristic against the CURRENT settings file.
+# entries_look_tailored <new_allow_json> <tool_name> <tool_input_json>
+# Returns 0 if any entry in new_allow looks plausibly tied to the given tool
+# call. Because we only persisted a sha in the breadcrumb (not the previous
+# array), we test every entry in the current settings file rather than diffing.
+# That is a wider net than the plan's diff-and-test heuristic, but the worst
+# case (allowed_always when the user already had the matching entry) is still
+# truthful.
 #
-# For the "is it plausibly tailored" check we use the current new_allow array
-# in full (old is omitted here; we only snapshot the hash). Plausible match:
+# Plausible match per tool:
 #   - Bash(cmd)  tool entry: the rule pattern, stripped of a trailing ":*",
 #                matches a leading token of tool_input.command. Also accept
 #                raw "Bash" with no argument if tool_name == Bash.
@@ -172,14 +148,8 @@ is_denied_response() {
 #   - Tool name equality fallback: a bare "<ToolName>" entry matches any call
 #                to that tool.
 # All other entries fall through as "not tailored".
-#
-# $1 is IGNORED for now (we don't have the old content, only sha), but kept in
-# the signature so callers can pass the pre-snapshot when we upgrade the
-# breadcrumb schema in the future.
 entries_look_tailored() {
-  # shellcheck disable=SC2034
-  local _old_allow="$1"
-  local new_entries="$2" tool_name="$3" tool_input="$4"
+  local new_entries="$1" tool_name="$2" tool_input="$3"
 
   [ -z "$new_entries" ] && return 1
   # Iterate the new_entries array; each is a string like "Bash(ls:*)".
@@ -219,8 +189,10 @@ entry_matches_call() {
 
   case "$tool_name" in
     Bash)
-      # Strip ":*" tail.
-      local prefix="${entry_arg%:*}"
+      # Strip a literal ":*" tail (the native permissions glob suffix). Use
+      # a literal-asterisk glob so a single colon inside the entry (e.g.
+      # `mcp__git:status`) is preserved instead of being lopped off.
+      local prefix="${entry_arg%:\*}"
       [ -z "$prefix" ] && return 1
       # Extract the first token from the tool_input.command.
       local cmd first_tok
@@ -258,7 +230,9 @@ entry_matches_call() {
     *)
       # Generic fallback: if entry_arg is a non-empty substring of the first
       # string value in tool_input, call it tailored.
-      [ -z "$entry_arg" ] && return 0
+      # Empty entry_arg has no signal -> not tailored, otherwise we would
+      # mark every call to that tool as tailored to a generic Tool() entry.
+      [ -z "$entry_arg" ] && return 1
       local any_val
       any_val="$(jq -r '[.. | strings] | .[0] // ""' <<<"$tool_input" 2>/dev/null || echo '')"
       case "$any_val" in
@@ -287,9 +261,25 @@ read_settings_deny() {
 # ---------------------------------------------------------------------------
 trap 'printf "[passthru] unexpected error in post-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
 
-# --- 1. Audit sentinel -----------------------------------------------------
-# When disabled, zero-overhead: do not even read stdin.
+# --- 1. Audit sentinel + self-heal -----------------------------------------
+# When disabled, we still self-heal the breadcrumb left over by PreToolUse so
+# orphans do not accumulate in $TMPDIR if the user toggles audit off mid-flight.
+# We do not write anything, do not classify, do not even parse stdin past
+# tool_use_id extraction.
 if ! audit_enabled; then
+  if [ ! -t 0 ]; then
+    DRAIN_INPUT="$(cat || true)"
+  else
+    DRAIN_INPUT=""
+  fi
+  if [ -n "$DRAIN_INPUT" ] && jq -e '.' >/dev/null 2>&1 <<<"$DRAIN_INPUT"; then
+    DRAIN_TUID="$(jq -r '.tool_use_id // ""' <<<"$DRAIN_INPUT" 2>/dev/null || true)"
+    DRAIN_SAFE_TUID="$(sanitize_tool_use_id "$DRAIN_TUID")"
+    if [ -n "$DRAIN_SAFE_TUID" ]; then
+      DRAIN_PATH="$(passthru_tmpdir)/passthru-pre-${DRAIN_SAFE_TUID}.json"
+      [ -f "$DRAIN_PATH" ] && rm -f "$DRAIN_PATH" 2>/dev/null || true
+    fi
+  fi
   emit_passthrough
   exit 0
 fi
@@ -321,7 +311,15 @@ if [ -z "$TOOL_USE_ID" ]; then
   exit 0
 fi
 
-CRUMB_PATH="$(passthru_tmpdir)/passthru-pre-${TOOL_USE_ID}.json"
+# Sanitize before composing the path. PreToolUse uses the same sanitizer so
+# the file we look up here matches the one written there.
+SAFE_TOOL_USE_ID="$(sanitize_tool_use_id "$TOOL_USE_ID")"
+if [ -z "$SAFE_TOOL_USE_ID" ]; then
+  emit_passthrough
+  exit 0
+fi
+
+CRUMB_PATH="$(passthru_tmpdir)/passthru-pre-${SAFE_TOOL_USE_ID}.json"
 if [ ! -f "$CRUMB_PATH" ]; then
   # No breadcrumb means PreToolUse decided allow/deny itself (or audit was
   # off then). Silent no-op; no log line.
@@ -365,8 +363,8 @@ if is_denied_response "$TOOL_RESPONSE"; then
   if [ "$USER_CHANGED" -eq 1 ] || [ "$PROJ_CHANGED" -eq 1 ]; then
     UDENY="$(read_settings_deny "$USER_SETTINGS")"
     PDENY="$(read_settings_deny "$PROJ_SETTINGS")"
-    if entries_look_tailored "[]" "$UDENY" "$TOOL_NAME" "$TOOL_INPUT" \
-      || entries_look_tailored "[]" "$PDENY" "$TOOL_NAME" "$TOOL_INPUT"; then
+    if entries_look_tailored "$UDENY" "$TOOL_NAME" "$TOOL_INPUT" \
+      || entries_look_tailored "$PDENY" "$TOOL_NAME" "$TOOL_INPUT"; then
       EVENT="asked_denied_always"
     fi
   fi
@@ -378,8 +376,8 @@ else
     # Something in settings changed. Look for a plausibly-tailored entry.
     UALLOW="$(read_settings_allow "$USER_SETTINGS")"
     PALLOW="$(read_settings_allow "$PROJ_SETTINGS")"
-    if entries_look_tailored "[]" "$UALLOW" "$TOOL_NAME" "$TOOL_INPUT" \
-      || entries_look_tailored "[]" "$PALLOW" "$TOOL_NAME" "$TOOL_INPUT"; then
+    if entries_look_tailored "$UALLOW" "$TOOL_NAME" "$TOOL_INPUT" \
+      || entries_look_tailored "$PALLOW" "$TOOL_NAME" "$TOOL_INPUT"; then
       EVENT="asked_allowed_always"
     else
       EVENT="asked_allowed_unknown"

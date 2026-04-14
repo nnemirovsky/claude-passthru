@@ -12,10 +12,11 @@ claude --plugin-dir /path/to/claude-passthru
 
 Every Claude Code restart re-reads the plugin from disk. No `/plugin install`, no marketplace cache to flush. This is the fastest iteration loop.
 
-The scripts and hooks honor two environment overrides so bats tests and local experiments do not touch your real `~/.claude`:
+The scripts and hooks honor environment overrides so bats tests and local experiments do not touch your real `~/.claude`:
 
 * `PASSTHRU_USER_HOME` - overrides the user scope root. Default `$HOME`.
 * `PASSTHRU_PROJECT_DIR` - overrides the project scope root. Default `$PWD`.
+* `PASSTHRU_WRITE_LOCK_TIMEOUT` - lock acquisition timeout in seconds for `scripts/write-rule.sh` (and the slash commands plus `bootstrap.sh --write` that call into it). Default `5`. Lower it in concurrency tests, raise it on slow filesystems.
 
 ## Running tests
 

@@ -191,7 +191,7 @@ File locations:
 - [x] `git init` in the repo root. Work on `main` (default branch). (already initialized)
 - [x] create `plugin.json` with `name: "passthru"`, `version: "0.1.0"`, description.
 - [x] create `marketplace.json` at `.claude-plugin/marketplace.json` (root of repo, alongside `plugin.json`) - required by Claude Code's `/plugin marketplace add <repo>` resolver.
-- [x] create `hooks.json` with one `PreToolUse` entry, matcher `"*"`, pointing at `${CLAUDE_PLUGIN_ROOT}/hooks/handlers/pre-tool-use.sh`, timeout 2 (jq+grep is well under 1s; 2s is enough headroom without masking runaway hooks).
+- [x] create `hooks.json` with one `PreToolUse` entry, matcher `"*"`, pointing at `${CLAUDE_PLUGIN_ROOT}/hooks/handlers/pre-tool-use.sh`, timeout 10 (jq+perl per-rule overhead means 40-50 rules can approach 2s; 10s leaves slack for large rule sets without masking truly runaway hooks).
 - [x] create minimal `README.md` stub (full version in Task 10).
 - [x] create `.gitignore` excluding `.DS_Store`, `tests/tmp/`.
 - [x] write bats test that validates all JSON files parse and contain required keys.

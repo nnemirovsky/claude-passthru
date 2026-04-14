@@ -99,10 +99,11 @@ setup() {
   [[ "$output" == *'pre-tool-use.sh' ]]
 }
 
-@test "hooks/hooks.json PreToolUse timeout is 2" {
+@test "hooks/hooks.json PreToolUse timeout is 10" {
+  # 10s leaves headroom for ~50-rule sets where per-rule jq+perl forks add up.
   run jq -r '.hooks.PreToolUse[0].hooks[0].timeout' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "2" ]
+  [ "$output" = "10" ]
 }
 
 @test "hooks/hooks.json has exactly one PostToolUse entry" {
@@ -124,10 +125,10 @@ setup() {
   [[ "$output" == *'post-tool-use.sh' ]]
 }
 
-@test "hooks/hooks.json PostToolUse timeout is 2" {
+@test "hooks/hooks.json PostToolUse timeout is 10" {
   run jq -r '.hooks.PostToolUse[0].hooks[0].timeout' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "2" ]
+  [ "$output" = "10" ]
 }
 
 @test "README.md exists and is non-empty" {

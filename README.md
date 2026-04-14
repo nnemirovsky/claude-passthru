@@ -214,6 +214,8 @@ claude --plugin-dir /path/to/claude-passthru
 
 This is the fastest dev loop. Every time you restart Claude Code the plugin is re-read from disk. No `/plugin install`, no cache flush, no uninstall step between iterations.
 
+**Heads-up:** the plugin self-allow regex matches the canonical marketplace install path (`~/.claude/plugins/.../claude-passthru/scripts/<name>.sh`). When you load the plugin via `--plugin-dir` from a clone elsewhere on disk, that regex does not match, and slash commands like `/passthru:add` will hit the native permission dialog the first time. Either accept the dialog once per shell, or add a temporary one-line allow rule to your own `passthru.json` matching the dev path. The self-allow is intentionally narrow to prevent rogue scripts from impersonating the plugin.
+
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full dev workflow including running tests and pipe-testing the hook.
 
 ## Audit log
@@ -275,7 +277,7 @@ bash scripts/log.sh --format raw | jq .
 * **Disable every rule without uninstalling.** `touch ~/.claude/passthru.disabled` turns the plugin into a no-op (the hook sees the sentinel and returns passthrough immediately). Remove the file to re-enable.
 * **Bad rules after a manual edit.** Run `/passthru:verify` or `bash scripts/verify.sh` to see exactly which file, path, and message failed.
 * **Rules are not firing.** Launch Claude Code with `claude --debug` and watch the hook output. The handler prints its decision reason to stderr, which `--debug` surfaces.
-* **Concurrent writes or a stuck lock.** `scripts/write-rule.sh` uses a directory lock at `<target>.lock.d`. If the process that held the lock died without releasing it, remove the directory manually.
+* **Concurrent writes or a stuck lock.** `scripts/write-rule.sh` serializes writers under a single user-scope lock at `~/.claude/passthru.write.lock` (with `flock(1)` when available) or the directory `~/.claude/passthru.write.lock.d` (mkdir-based fallback on systems without `flock`). If the process that held the lock died without releasing it, remove that file or directory manually. Lock-acquisition timeout defaults to 5 seconds and can be overridden via `PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment.
 
 ## License
 

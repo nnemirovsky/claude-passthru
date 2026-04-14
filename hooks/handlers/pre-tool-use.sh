@@ -54,47 +54,10 @@ fi
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-
-# passthru_user_home: resolve user home with env override support.
-# Mirrors the path helpers in common.sh so audit/sentinel paths stay consistent.
-passthru_user_home() {
-  printf '%s\n' "${PASSTHRU_USER_HOME:-$HOME}"
-}
-
-# passthru_tmpdir: honor $TMPDIR, fall back to /tmp.
-passthru_tmpdir() {
-  printf '%s\n' "${TMPDIR:-/tmp}"
-}
-
-# passthru_iso_ts: UTC timestamp in ISO8601 with trailing Z.
-passthru_iso_ts() {
-  date -u +%Y-%m-%dT%H:%M:%SZ
-}
-
-# passthru_sha256 <path>: emit sha256 hex, or empty string if file missing.
-# Detects shasum (macOS default) vs sha256sum (Linux).
-passthru_sha256() {
-  local path="$1"
-  [ -f "$path" ] || return 0
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$path" 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" 2>/dev/null | awk '{print $1}'
-  fi
-  # If neither is available, emit empty -> breadcrumb stores null.
-}
-
-# audit_enabled: 0 if sentinel ~/.claude/passthru.audit.enabled exists, 1 otherwise.
-audit_enabled() {
-  local sentinel
-  sentinel="$(passthru_user_home)/.claude/passthru.audit.enabled"
-  [ -e "$sentinel" ]
-}
-
-# audit_log_path: path to ~/.claude/passthru-audit.log (may not exist).
-audit_log_path() {
-  printf '%s/.claude/passthru-audit.log\n' "$(passthru_user_home)"
-}
+# passthru_user_home, passthru_tmpdir, passthru_iso_ts, passthru_sha256,
+# sanitize_tool_use_id, audit_enabled, audit_log_path, emit_passthrough
+# all live in common.sh and are shared with post-tool-use.sh and the
+# scripts/.
 
 # audit_write_line <event> <tool_name> <reason_or_empty> <rule_index_or_empty> <pattern_or_empty> <tool_use_id_or_empty>
 # Appends one JSONL line. Fails silently on write error (fail-open).
@@ -151,6 +114,10 @@ audit_write_breadcrumb() {
 
   local tool_use_id="$1" tool="$2" tool_input="$3"
   [ -z "$tool_use_id" ] && return 0
+  # Sanitize before using as a path component.
+  local safe_id
+  safe_id="$(sanitize_tool_use_id "$tool_use_id")"
+  [ -z "$safe_id" ] && return 0
 
   local tmpdir ts user_sha proj_sha user_settings proj_settings path crumb
   tmpdir="$(passthru_tmpdir)"
@@ -160,7 +127,7 @@ audit_write_breadcrumb() {
   user_sha="$(passthru_sha256 "$user_settings")"
   proj_sha="$(passthru_sha256 "$proj_settings")"
 
-  path="${tmpdir}/passthru-pre-${tool_use_id}.json"
+  path="${tmpdir}/passthru-pre-${safe_id}.json"
 
   # Use jq to build the crumb so tool_input is embedded as real JSON
   # (not a stringified payload). tool_input may be "null" if stdin was
@@ -198,10 +165,7 @@ audit_gc_breadcrumbs() {
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
-
-emit_passthrough() {
-  printf '{"continue": true}\n'
-}
+# emit_passthrough lives in common.sh.
 
 emit_decision() {
   # $1 = "allow" | "deny"
@@ -254,9 +218,11 @@ if ! jq -e '.' >/dev/null 2>&1 <<<"$INPUT"; then
   exit 0
 fi
 
-TOOL_NAME="$(jq -r '.tool_name // ""' <<<"$INPUT" 2>/dev/null || true)"
-TOOL_INPUT="$(jq -c '.tool_input // {}' <<<"$INPUT" 2>/dev/null || echo '{}')"
-TOOL_USE_ID="$(jq -r '.tool_use_id // ""' <<<"$INPUT" 2>/dev/null || true)"
+# INPUT was already validated as JSON by `jq -e '.'` above, so these calls
+# cannot fail. Defensively allow `// ""` defaults for missing fields.
+TOOL_NAME="$(jq -r '.tool_name // ""' <<<"$INPUT" 2>/dev/null)"
+TOOL_INPUT="$(jq -c '.tool_input // {}' <<<"$INPUT" 2>/dev/null)"
+TOOL_USE_ID="$(jq -r '.tool_use_id // ""' <<<"$INPUT" 2>/dev/null)"
 
 # GC old breadcrumbs early so every invocation keeps TMPDIR tidy. Does nothing
 # when audit is disabled.
@@ -268,7 +234,7 @@ audit_gc_breadcrumbs
 #   bash /Users/foo/.claude/plugins/cache/umputun/claude-passthru/1.0.0/plugins/claude-passthru/scripts/verify.sh
 # We only self-allow Bash calls; other tools would not invoke our scripts.
 if [ "$TOOL_NAME" = "Bash" ]; then
-  SELF_CMD="$(jq -r '.command // ""' <<<"$TOOL_INPUT" 2>/dev/null || true)"
+  SELF_CMD="$(jq -r '.command // ""' <<<"$TOOL_INPUT" 2>/dev/null)"
   if [ -n "$SELF_CMD" ]; then
     # Plugin install path on disk is ~/.claude/plugins/... so the leading dot
     # in .claude must be escaped for regex (literal dot).
@@ -283,16 +249,15 @@ fi
 
 # --- 4. Load + validate rules ----------------------------------------------
 # load_rules or validate_rules failure -> fail open with stderr diagnostic.
+# Capture stdout directly; load_rules sends parse errors to stderr (which we
+# let surface to Claude Code's --debug stream) and we pass the merged JSON
+# back via stdout. No temp-file ping-pong, no $TMPDIR guesswork.
 MERGED=""
-if ! MERGED="$(load_rules 2>&1 1>/tmp/.passthru-merged-$$)"; then
-  LOAD_ERR="$MERGED"
-  rm -f "/tmp/.passthru-merged-$$" 2>/dev/null || true
-  printf '[passthru] load_rules failed: %s\n' "$LOAD_ERR" >&2
+if ! MERGED="$(load_rules 2>/dev/null)"; then
+  printf '[passthru] load_rules failed; passing through\n' >&2
   emit_passthrough
   exit 0
 fi
-MERGED="$(cat "/tmp/.passthru-merged-$$" 2>/dev/null || echo '')"
-rm -f "/tmp/.passthru-merged-$$" 2>/dev/null || true
 
 if [ -z "$MERGED" ]; then
   printf '[passthru] load_rules produced no output; passing through\n' >&2
@@ -307,11 +272,13 @@ if ! validate_rules "$MERGED" 2>/dev/null; then
 fi
 
 # --- 5. Match deny first ---------------------------------------------------
-DENY_RULES="$(jq -c '.deny // []' <<<"$MERGED" 2>/dev/null || echo '[]')"
-ALLOW_RULES="$(jq -c '.allow // []' <<<"$MERGED" 2>/dev/null || echo '[]')"
+DENY_RULES="$(jq -c '.deny // []' <<<"$MERGED" 2>/dev/null)"
+ALLOW_RULES="$(jq -c '.allow // []' <<<"$MERGED" 2>/dev/null)"
+[ -z "$DENY_RULES" ] && DENY_RULES='[]'
+[ -z "$ALLOW_RULES" ] && ALLOW_RULES='[]'
 
-DENY_MATCH=""
-if DENY_MATCH="$(find_first_match "$DENY_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
+DENY_HIT=""
+if DENY_HIT="$(find_first_match "$DENY_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
   :  # normal path
 else
   # rc=2 (bad regex). Fail open.
@@ -320,25 +287,25 @@ else
   exit 0
 fi
 
-if [ -n "$DENY_MATCH" ]; then
-  REASON="$(jq -r '.reason // ""' <<<"$DENY_MATCH" 2>/dev/null || echo '')"
-  PATTERN="$(jq -r '.tool // (.match // {} | to_entries | .[0].value // "")' <<<"$DENY_MATCH" 2>/dev/null || echo '')"
+if [ -n "$DENY_HIT" ]; then
+  # find_first_match returns "<index>\t<rule-json>" so we split here.
+  DENY_IDX="${DENY_HIT%%$'\t'*}"
+  DENY_MATCH="${DENY_HIT#*$'\t'}"
+  REASON="$(jq -r '.reason // ""' <<<"$DENY_MATCH" 2>/dev/null)"
+  PATTERN="$(jq -r '.tool // (.match // {} | to_entries | .[0].value // "")' <<<"$DENY_MATCH" 2>/dev/null)"
   if [ -n "$REASON" ]; then
     MSG="passthru deny: ${REASON} [${PATTERN}]"
   else
     MSG="passthru deny: matched rule [${PATTERN}]"
   fi
   emit_decision "deny" "$MSG"
-  # Index in the deny list
-  IDX="$(jq -n --argjson rules "$DENY_RULES" --argjson rule "$DENY_MATCH" '
-    [$rules[] | . == $rule] | index(true) // empty' 2>/dev/null || echo '')"
-  audit_write_line "deny" "$TOOL_NAME" "$REASON" "${IDX:-}" "$PATTERN" "$TOOL_USE_ID"
+  audit_write_line "deny" "$TOOL_NAME" "$REASON" "$DENY_IDX" "$PATTERN" "$TOOL_USE_ID"
   exit 0
 fi
 
 # --- 6. Match allow --------------------------------------------------------
-ALLOW_MATCH=""
-if ALLOW_MATCH="$(find_first_match "$ALLOW_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
+ALLOW_HIT=""
+if ALLOW_HIT="$(find_first_match "$ALLOW_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
   :
 else
   printf '[passthru] allow rule regex error; passing through\n' >&2
@@ -346,18 +313,18 @@ else
   exit 0
 fi
 
-if [ -n "$ALLOW_MATCH" ]; then
-  REASON="$(jq -r '.reason // ""' <<<"$ALLOW_MATCH" 2>/dev/null || echo '')"
-  PATTERN="$(jq -r '.tool // (.match // {} | to_entries | .[0].value // "")' <<<"$ALLOW_MATCH" 2>/dev/null || echo '')"
+if [ -n "$ALLOW_HIT" ]; then
+  ALLOW_IDX="${ALLOW_HIT%%$'\t'*}"
+  ALLOW_MATCH="${ALLOW_HIT#*$'\t'}"
+  REASON="$(jq -r '.reason // ""' <<<"$ALLOW_MATCH" 2>/dev/null)"
+  PATTERN="$(jq -r '.tool // (.match // {} | to_entries | .[0].value // "")' <<<"$ALLOW_MATCH" 2>/dev/null)"
   if [ -n "$REASON" ]; then
     MSG="passthru allow: ${REASON}"
   else
     MSG="passthru allow: matched rule [${PATTERN}]"
   fi
   emit_decision "allow" "$MSG"
-  IDX="$(jq -n --argjson rules "$ALLOW_RULES" --argjson rule "$ALLOW_MATCH" '
-    [$rules[] | . == $rule] | index(true) // empty' 2>/dev/null || echo '')"
-  audit_write_line "allow" "$TOOL_NAME" "$REASON" "${IDX:-}" "$PATTERN" "$TOOL_USE_ID"
+  audit_write_line "allow" "$TOOL_NAME" "$REASON" "$ALLOW_IDX" "$PATTERN" "$TOOL_USE_ID"
   exit 0
 fi
 

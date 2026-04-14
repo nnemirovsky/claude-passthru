@@ -21,6 +21,66 @@
 # This file is sourced, not executed.
 
 # ---------------------------------------------------------------------------
+# Shared environment helpers (used by hook handlers, scripts, and tests)
+# ---------------------------------------------------------------------------
+
+# passthru_user_home: resolve user home with env override support so tests
+# can point at a synthetic ~/.claude.
+passthru_user_home() {
+  printf '%s\n' "${PASSTHRU_USER_HOME:-$HOME}"
+}
+
+# passthru_tmpdir: honor $TMPDIR, fall back to /tmp.
+passthru_tmpdir() {
+  printf '%s\n' "${TMPDIR:-/tmp}"
+}
+
+# passthru_iso_ts: UTC timestamp in ISO8601 with trailing Z.
+passthru_iso_ts() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# passthru_sha256 <path>: emit sha256 hex, or empty string if file missing.
+# Detects shasum (macOS default) vs sha256sum (Linux).
+passthru_sha256() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" 2>/dev/null | awk '{print $1}'
+  fi
+}
+
+# sanitize_tool_use_id <id>: emit a filesystem-safe form (only [A-Za-z0-9_-]).
+# Anything else is stripped. Empty result -> empty stdout (caller skips work).
+# This blocks path-traversal via crafted tool_use_id values that would
+# otherwise land in $TMPDIR/passthru-pre-<id>.json.
+sanitize_tool_use_id() {
+  local id="$1"
+  [ -z "$id" ] && return 0
+  printf '%s' "$id" | tr -cd 'A-Za-z0-9_-'
+}
+
+# audit_enabled: 0 if sentinel ~/.claude/passthru.audit.enabled exists, 1 otherwise.
+audit_enabled() {
+  local sentinel
+  sentinel="$(passthru_user_home)/.claude/passthru.audit.enabled"
+  [ -e "$sentinel" ]
+}
+
+# audit_log_path: path to ~/.claude/passthru-audit.log (may not exist).
+audit_log_path() {
+  printf '%s/.claude/passthru-audit.log\n' "$(passthru_user_home)"
+}
+
+# emit_passthrough: write the canonical passthrough JSON envelope to stdout.
+# Used by every handler to fail-open on errors.
+emit_passthrough() {
+  printf '{"continue": true}\n'
+}
+
+# ---------------------------------------------------------------------------
 # Rule file paths
 # ---------------------------------------------------------------------------
 
@@ -329,12 +389,14 @@ match_rule() {
       return 1
     fi
     # Extract the field from tool_input. Detect null/missing distinctly from empty string.
-    field_null="$(jq -r "if has(\"${key}\") and (.\"${key}\" != null) then \"0\" else \"1\" end" <<<"$tool_input" 2>/dev/null)"
+    # Use jq --arg to avoid shell-injection via crafted match-key names (a key
+    # containing a double-quote would otherwise break or alter the jq program).
+    field_null="$(jq -r --arg k "$key" 'if has($k) and (.[$k] != null) then "0" else "1" end' <<<"$tool_input" 2>/dev/null)"
     if [ "$field_null" != "0" ]; then
       # Field missing or null -> rule does not match.
       return 1
     fi
-    field="$(jq -r ".\"${key}\" // \"\"" <<<"$tool_input" 2>/dev/null)"
+    field="$(jq -r --arg k "$key" '.[$k] // ""' <<<"$tool_input" 2>/dev/null)"
     pcre_match "$field" "$pat"
     local rc=$?
     if [ "$rc" -eq 2 ]; then
@@ -353,13 +415,19 @@ match_rule() {
 # ---------------------------------------------------------------------------
 #
 # Usage: find_first_match <rules_array_json> <tool_name> <tool_input_json>
-# Output: the first matching rule JSON (compact) on stdout; empty output if no match.
+# Output: TAB-separated record on stdout when a rule matches:
+#           <rule-index>\t<compact rule JSON>
+#         Empty stdout when no rule matches.
+#         Callers split with: IDX="${out%%$'\t'*}"; RULE="${out#*$'\t'}"
 # Return:
 #   0 always on clean traversal (even if no match - check stdout for emptiness)
 #   2 if a regex in any visited rule fails to compile; stderr carries the index + pattern
 #
 # The caller is responsible for selecting which list to pass in (e.g. .deny first,
 # then .allow). No in-function jq path indirection, per plan.
+#
+# Returning the index alongside the rule lets callers skip a second jq pass
+# (e.g. for audit-log rule_index) at no real complexity cost.
 find_first_match() {
   local rules="$1"
   local tool_name="$2"
@@ -382,7 +450,7 @@ find_first_match() {
     match_rule "$tool_name" "$tool_input" "$rule"
     rc=$?
     if [ "$rc" -eq 0 ]; then
-      printf '%s\n' "$rule"
+      printf '%s\t%s\n' "$i" "$rule"
       return 0
     elif [ "$rc" -eq 2 ]; then
       printf '[ERR] regex compile failure at rule index %s: %s\n' "$i" "$rule" >&2

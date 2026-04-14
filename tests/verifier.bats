@@ -66,15 +66,15 @@ run_verify() {
 @test "verifier: one valid + one invalid file -> exit 1 only naming bad file" {
   place "$USER_ROOT/.claude/passthru.json" "user-only.json"
   place "$PROJ_ROOT/.claude/passthru.json" "invalid-regex.json"
-  run_verify
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"$PROJ_ROOT"* ]] || [[ "$stderr" == *"$PROJ_ROOT"* ]] || [[ "$BATS_RUN_TMPDIR" != "" ]]
-  # The actual [ERR] line goes to stderr; combined output in bats `run` is stdout.
-  # Use run with merged stream to cover both.
+  # Run with stderr merged so we can assert on the [ERR] line directly.
   run bash -c "bash '$VERIFY' 2>&1"
   [ "$status" -eq 1 ]
+  # Bad file is named in the error.
   [[ "$output" == *"$PROJ_ROOT"* ]]
-  [[ "$output" != *"$USER_ROOT/.claude/passthru.json:"* ]] || true
+  # Good file is NOT named with a `:`-suffixed jq path (i.e. no error against it).
+  if printf '%s' "$output" | grep -q "$USER_ROOT/.claude/passthru.json:"; then
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------------------

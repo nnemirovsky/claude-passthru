@@ -128,11 +128,12 @@ EOF
   local count
   count="$(printf '%s\n' "$output" | grep -c '"event":"allow"' || true)"
   [ "$count" -eq 1 ]
-  # No deny / passthrough / asked_* leaked through.
-  printf '%s\n' "$output" | grep -q '"event":"deny"' && return 1
-  printf '%s\n' "$output" | grep -q '"event":"passthrough"' && return 1
-  printf '%s\n' "$output" | grep -q '"event":"asked_' && return 1
-  return 0
+  # No deny / passthrough / asked_* leaked through. Use [[ != ]] pattern
+  # rather than `grep && return 1` so a missing newline / partial match
+  # cannot silently flip the assertion.
+  [[ "$output" != *'"event":"deny"'* ]]
+  [[ "$output" != *'"event":"passthrough"'* ]]
+  [[ "$output" != *'"event":"asked_'* ]]
 }
 
 @test "--event '^asked_' selects only native-dialog events" {
@@ -155,8 +156,7 @@ EOF
   count="$(printf '%s\n' "$output" | grep -c '"tool":"Bash"' || true)"
   [ "$count" -eq 2 ]
   # No Read lines in output.
-  printf '%s\n' "$output" | grep -q '"tool":"Read"' && return 1
-  return 0
+  [[ "$output" != *'"tool":"Read"'* ]]
 }
 
 # -- filter: --since --------------------------------------------------------
@@ -166,11 +166,10 @@ EOF
   run_log --since 1h --format raw
   [ "$status" -eq 0 ]
   # Two-hour-old allow entry must be excluded.
-  printf '%s\n' "$output" | grep -q 'two-hours-old' && return 1
+  [[ "$output" != *"two-hours-old"* ]]
   # 30m, 5m, now entries must all be present.
   [[ "$output" == *"blocked rm -rf"* ]]
   [[ "$output" == *'"tool_use_id":"recent1"'* ]]
-  return 0
 }
 
 @test "--since 7d keeps all fixture entries" {
@@ -188,12 +187,11 @@ EOF
   [ "$status" -eq 0 ]
   # The 5-min-old entry is right on the cutoff. Allow either 1 or 2 recent
   # entries but the older ones must be gone.
-  printf '%s\n' "$output" | grep -q 'two-hours-old' && return 1
-  printf '%s\n' "$output" | grep -q 'blocked rm -rf' && return 1
+  [[ "$output" != *"two-hours-old"* ]]
+  [[ "$output" != *"blocked rm -rf"* ]]
   # "recent1" appears in two entries (passthrough + asked_allowed_once).
   # At least one of them should be present.
   [[ "$output" == *'"tool_use_id":"recent1"'* ]]
-  return 0
 }
 
 @test "--since with bad value exits 2 with stderr" {
@@ -242,17 +240,23 @@ EOF
 
 # -- --format raw -----------------------------------------------------------
 
-@test "--format raw passes JSONL through unchanged (whitespace-insensitive)" {
+@test "--format raw emits the same canonical JSONL the file holds" {
+  # NOTE: --format raw still funnels lines through `jq -c '.'` for parse
+  # validation, so each line is canonicalized (key order, spacing). This test
+  # asserts on the canonical forms matching, NOT on byte-for-byte preservation
+  # of the on-disk format.
   write_fixture
   run_log --format raw
   [ "$status" -eq 0 ]
 
-  # Normalize both sides: strip trailing newlines, compare byte-for-byte.
+  # Build expected by piping each fixture line through `jq -c '.'` so we
+  # compare like-against-like.
   local got expected
   got="$(printf '%s' "$output")"
-  expected="$(cat "$LOG_PATH")"
-  # Trim trailing newline on expected.
+  expected="$(jq -c '.' "$LOG_PATH" | tr -d '\r')"
+  # Trim trailing newline on both sides.
   while [ "${expected: -1}" = $'\n' ]; do expected="${expected%$'\n'}"; done
+  while [ "${got: -1}" = $'\n' ]; do got="${got%$'\n'}"; done
   [ "$got" = "$expected" ]
 }
 
@@ -268,9 +272,8 @@ EOF
   # Last two entries are passthrough + asked_allowed_once.
   [[ "$output" == *'"event":"passthrough"'* ]]
   [[ "$output" == *'"event":"asked_allowed_once"'* ]]
-  printf '%s\n' "$output" | grep -q '"event":"allow"' && return 1
-  printf '%s\n' "$output" | grep -q '"event":"deny"' && return 1
-  return 0
+  [[ "$output" != *'"event":"allow"'* ]]
+  [[ "$output" != *'"event":"deny"'* ]]
 }
 
 @test "--tail 2 combined with --event filters first then tails" {
@@ -348,6 +351,84 @@ EOF
   run_log --tail abc
   [ "$status" -eq 2 ]
   [[ "$output" == *"--tail"* ]]
+}
+
+@test "--tail 0 exits 2 with explanatory stderr" {
+  write_fixture
+  run_log --tail 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--tail"* ]]
+}
+
+# -- additional --since coverage --------------------------------------------
+
+@test "--since today keeps entries from local midnight onward" {
+  write_fixture
+  run_log --since today --format raw
+  [ "$status" -eq 0 ]
+  # All four fixture entries are within the last 2 hours, so they should
+  # all survive the today cutoff.
+  local n
+  n="$(printf '%s\n' "$output" | grep -c '"ts":' || true)"
+  [ "$n" -eq 4 ]
+}
+
+@test "--since 30d keeps all fixture entries" {
+  write_fixture
+  run_log --since 30d --format raw
+  [ "$status" -eq 0 ]
+  local n
+  n="$(printf '%s\n' "$output" | grep -c '"ts":' || true)"
+  [ "$n" -eq 4 ]
+}
+
+# -- bad regex in filter flags ---------------------------------------------
+
+@test "--event with bad regex exits 2 with stderr message" {
+  write_fixture
+  # `(unclosed` is an invalid PCRE.
+  run_log --event '(unclosed' --format raw
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid --event"* ]]
+}
+
+@test "--tool with bad regex exits 2 with stderr message" {
+  write_fixture
+  run_log --tool '(broken' --format raw
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid --tool"* ]]
+}
+
+# -- ANSI color (table format) ---------------------------------------------
+
+@test "table format writes no ANSI escape sequences when TERM=dumb" {
+  write_fixture
+  TERM=dumb run_log
+  [ "$status" -eq 0 ]
+  # ESC sequences must not appear in the output.
+  [[ "$output" != *$'\033'* ]]
+}
+
+# -- multiple malformed lines ----------------------------------------------
+
+@test "multiple malformed lines mid-log -> warnings, all valid lines processed" {
+  write_fixture
+  # Inject three bad lines at different positions.
+  local tmp
+  tmp="$(mktemp)"
+  awk 'NR==1 {print; print "garbage line 1"; next}
+       NR==3 {print; print "{not-json"; next}
+       NR==4 {print; print ""; next}
+       {print}' "$LOG_PATH" > "$tmp"
+  mv "$tmp" "$LOG_PATH"
+  run_log --format raw
+  [ "$status" -eq 0 ]
+  # All four valid lines still survive.
+  local n
+  n="$(printf '%s\n' "$output" | grep -c '"ts":' || true)"
+  [ "$n" -eq 4 ]
+  # At least one warning line surfaced.
+  [[ "$output" == *"warning"* ]] || [[ "$output" == *"skipping"* ]]
 }
 
 # -- table format ----------------------------------------------------------

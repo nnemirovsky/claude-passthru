@@ -123,14 +123,16 @@ run_boot() {
 
 @test "bootstrap: dry-run output matches --write file content (schema-wise)" {
   cp "$FIXTURES/settings-with-allow.json" "$PROJ_ROOT/.claude/settings.local.json"
-  # dry-run captured stdout only
-  dry="$(bash "$BOOTSTRAP" 2>/dev/null)"
-  # Extract just the proj doc: it follows the '# would write: .../proj/...' marker.
-  proj_doc="$(printf '%s' "$dry" | awk "/# would write: ${PROJ_ROOT//\//\\/}/,0" | tail -n +2)"
-  run bash "$BOOTSTRAP" --write
+  # Use --project-only so dry-run stdout contains a single document.
+  # Strip the "# would write: ..." marker line(s) and parse the rest as JSON.
+  # This is independent of the marker text exact form.
+  dry="$(bash "$BOOTSTRAP" --project-only 2>/dev/null | grep -v '^#')"
+  # Validate the dry output is a JSON document.
+  printf '%s' "$dry" | jq -e '.' >/dev/null
+  run bash "$BOOTSTRAP" --project-only --write
   [ "$status" -eq 0 ]
-  # Compare semantic JSON equality
-  run jq --argjson a "$(cat "$(proj_imported)")" --argjson b "$proj_doc" -n '$a == $b'
+  # Compare semantic JSON equality.
+  run jq --argjson a "$(cat "$(proj_imported)")" --argjson b "$dry" -n '$a == $b'
   [ "$output" = "true" ]
 }
 

@@ -163,9 +163,12 @@ BACKUP=""
 cleanup() {
   local rc=$?
   release_lock
-  # On error, restore backup if one exists.
+  # On error, restore backup if one exists. Covers `set -e` aborting between
+  # the mv-over and the explicit `BACKUP=""` reset further down so the user
+  # never sees a half-written TARGET with a wiped BACKUP.
   if [ "$rc" -ne 0 ] && [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
-    :
+    mv -f "$BACKUP" "$TARGET" 2>/dev/null || true
+    BACKUP=""
   fi
   # Always drop stale backup on clean exit.
   [ -n "$BACKUP" ] && [ -f "$BACKUP" ] && rm -f "$BACKUP" 2>/dev/null || true

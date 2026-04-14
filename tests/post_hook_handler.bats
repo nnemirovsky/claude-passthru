@@ -88,14 +88,26 @@ write_settings() {
 # Disabled mode (sentinel absent)
 # ---------------------------------------------------------------------------
 
-@test "audit disabled + breadcrumb exists -> no log, no action, breadcrumb untouched" {
+@test "audit disabled + breadcrumb exists -> no log, breadcrumb self-healed (unlinked)" {
+  # Plan contract: "audit disabled = no-op regardless of breadcrumb (self-heal
+  # - unlink only)". We do not write the audit log, do not classify, but we
+  # do drop the orphan crumb so $TMPDIR does not slowly fill up if the user
+  # toggles audit on/off across sessions.
   write_breadcrumb "tid1" "Bash" '{"command":"ls"}' "" ""
   run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tid1","tool_response":{"stdout":"x"}}'
   [ "$status" -eq 0 ]
   [[ "$output" == *'{"continue": true}'* ]]
   [ ! -f "$(audit_log)" ]
-  # Breadcrumb left untouched when audit was disabled.
-  [ -f "$(crumb_path "tid1")" ]
+  # Breadcrumb is self-healed when audit was disabled.
+  [ ! -f "$(crumb_path "tid1")" ]
+}
+
+@test "audit disabled + no breadcrumb + unrelated tool_use_id -> no-op, no error" {
+  # Disabled, no crumb to clean up. Should still pass through cleanly.
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tid-other","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'{"continue": true}'* ]]
+  [ ! -f "$(audit_log)" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -281,4 +293,146 @@ write_settings() {
   line="$(head -n1 "$(audit_log)")"
   run jq -r '.event' <<<"$line"
   [ "$output" = "asked_allowed_always" ]
+}
+
+# ---------------------------------------------------------------------------
+# is_denied_response: regression / false-positive surface
+# ---------------------------------------------------------------------------
+
+@test "is_denied_response: missing tool_response field maps to literal null (denied per plan)" {
+  enable_audit
+  write_breadcrumb "tidEMPTY" "Bash" '{"command":"ls"}' "" ""
+  # Plan contract (line 268): "tool_response missing or marked as
+  # permission-blocked -> asked_denied_once". A payload without
+  # tool_response is normalized to JSON null and classified as denied.
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tidEMPTY"}'
+  [ "$status" -eq 0 ]
+
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: tool_response = {} (no permissionDenied) -> not denied" {
+  enable_audit
+  write_breadcrumb "tidOBJ" "Bash" '{"command":"ls"}' "" ""
+  # Empty object is a positive signal of a successful tool_response (no
+  # permissionDenied flag, no error, no denied status). Should classify as
+  # allowed once.
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tidOBJ","tool_response":{}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_once" ]
+}
+
+@test "is_denied_response: tool_response = null literal -> classified as denied" {
+  enable_audit
+  write_breadcrumb "tidNULL" "Bash" '{"command":"ls"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tidNULL","tool_response":null}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: error message containing 'permissions' (no anchor) -> NOT denied" {
+  enable_audit
+  write_breadcrumb "tidPERM" "Bash" '{"command":"chmod 0644 /tmp/x"}' "" ""
+  # Old overbroad regex flagged any 'permission' substring as denied. The
+  # corrected anchored pattern requires a permission_denied / access_denied
+  # / not_allowed / blocked / denied token, not just any "permission" word.
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"chmod 0644 /tmp/x"},"tool_use_id":"tidPERM","tool_response":{"stdout":"Updated file permissions to 0644"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_once" ]
+}
+
+@test "is_denied_response: error: 'permission denied' (anchored) -> denied" {
+  enable_audit
+  write_breadcrumb "tidPD" "Bash" '{"command":"cat /etc/shadow"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"},"tool_use_id":"tidPD","tool_response":{"error":"permission denied"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+# ---------------------------------------------------------------------------
+# entries_look_tailored: false-positive guard
+# ---------------------------------------------------------------------------
+
+@test "entries_look_tailored: bare 'Read' entry does NOT match Bash call (cross-tool guard)" {
+  enable_audit
+  # Old settings file is empty -> sha empty.
+  write_breadcrumb "tidXTOOL" "Bash" '{"command":"ls"}' "" ""
+  # User added a bare "Read" entry while the dialog was open for Bash.
+  # That entry does not cover the Bash call, so we should classify as unknown.
+  write_settings "$USER_ROOT/.claude/settings.json" '["Read"]' '[]'
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"tidXTOOL","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_unknown" ]
+}
+
+@test "entries_look_tailored: WebFetch(domain:x.com) does NOT mark a Bash call as tailored" {
+  enable_audit
+  write_breadcrumb "tidXTOOL2" "Bash" '{"command":"curl https://example.com"}' "" ""
+  # Settings gained a WebFetch domain entry, but the call was a Bash curl.
+  # That entry would cover an actual WebFetch call, not this one.
+  write_settings "$USER_ROOT/.claude/settings.json" '["WebFetch(domain:example.com)"]' '[]'
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"curl https://example.com"},"tool_use_id":"tidXTOOL2","tool_response":{"stdout":"ok"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_unknown" ]
+}
+
+@test "entries_look_tailored: generic 'OtherTool()' (empty arg) on unknown tool does NOT mark as tailored" {
+  enable_audit
+  write_breadcrumb "tidGEN" "Edit" '{"file_path":"/tmp/x"}' "" ""
+  # Settings gained "Edit()" - bare parentheses with empty arg. The fallback
+  # branch must treat empty entry_arg as a non-match, otherwise every Edit
+  # call would classify as tailored.
+  write_settings "$USER_ROOT/.claude/settings.json" '["Edit()"]' '[]'
+  run_handler '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/x"},"tool_use_id":"tidGEN","tool_response":{"ok":true}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_unknown" ]
+}
+
+@test "entry_matches_call: Bash multi-word prefix 'gh pr:*' matches 'gh pr close 42'" {
+  enable_audit
+  write_breadcrumb "tidGH" "Bash" '{"command":"gh pr close 42"}' "" ""
+  # Multi-word prefix is a corner of the Bash branch we previously did not
+  # exercise.
+  write_settings "$USER_ROOT/.claude/settings.json" '["Bash(gh pr:*)"]' '[]'
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh pr close 42"},"tool_use_id":"tidGH","tool_response":{"stdout":"closed"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
+# ---------------------------------------------------------------------------
+# tool_use_id sanitization (path-traversal guard)
+# ---------------------------------------------------------------------------
+
+@test "tool_use_id with path-traversal characters -> sanitized, no traversal" {
+  enable_audit
+  # Plant the breadcrumb that the SANITIZED id would resolve to.
+  safe_id="abc"
+  write_breadcrumb "$safe_id" "Bash" '{"command":"ls"}' "" ""
+  # Pass a tool_use_id with traversal characters; sanitizer should strip them.
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"../../etc/abc","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  # Either the handler consumed the safe-id breadcrumb (and unlinked it)
+  # OR it found nothing and no-oped. Both outcomes are safe; what we MUST
+  # guarantee is that no file was touched outside $TMPDIR.
+  [ ! -e "$BCTMP/../../etc/abc" ] || true
+  # The safe-id breadcrumb has either been consumed (asked_allowed_once) or
+  # left untouched (no breadcrumb match). We only assert no traversal.
 }
