@@ -262,19 +262,19 @@ Implementation note: macOS ships BSD grep without `-P`. Implementation uses `per
 - Modify: `/Users/nemirovsky/Developer/claude-passthru/hooks/hooks.json` (add PostToolUse entry, matcher `"*"`, timeout 2)
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/post_hook_handler.bats`
 
-- [ ] + implement handler: read stdin JSON, extract `tool_name`, `tool_input`, `tool_use_id`, `tool_response`. If audit sentinel is absent -> exit 0 immediately (`{"continue": true}` on stdout), zero overhead in disabled mode.
-- [ ] + look up the breadcrumb at `$TMPDIR/passthru-pre-<tool_use_id>.json`. If absent (meaning PreToolUse decided allow/deny itself, or audit was disabled then), exit 0 silently - we already logged the decision PreToolUse side.
-- [ ] + classify outcome:
+- [x] + implement handler: read stdin JSON, extract `tool_name`, `tool_input`, `tool_use_id`, `tool_response`. If audit sentinel is absent -> exit 0 immediately (`{"continue": true}` on stdout), zero overhead in disabled mode.
+- [x] + look up the breadcrumb at `$TMPDIR/passthru-pre-<tool_use_id>.json`. If absent (meaning PreToolUse decided allow/deny itself, or audit was disabled then), exit 0 silently - we already logged the decision PreToolUse side.
+- [x] + classify outcome:
   - tool_response missing or marked as permission-blocked -> `asked_denied_once` (note: Claude Code rarely persists deny decisions, so "denied always" is detected only if a new deny rule appeared in settings.json; otherwise default to "once"). Detect blocked via tool_response containing `permissionDenied: true` or similar indicator.
   - tool_response present and successful -> compute current settings.json sha for both user and project scopes. Compare to breadcrumb's snapshots:
     - user or project sha changed AND new permissions entry covers this tool call -> `asked_allowed_always`
     - unchanged -> `asked_allowed_once`
   - "new permissions entry covers this tool call" heuristic: diff the old vs new `permissions.allow` arrays, take the added entry, check if it's a substring/glob match for the current tool call. A rough heuristic; document the limitations. Never emit a wrong classification silently: on ambiguity, emit `asked_allowed_unknown` rather than guessing.
-- [ ] + write JSONL line to `~/.claude/passthru-audit.log`: `{"ts":"...","event":"asked_allowed_always|asked_allowed_once|asked_denied_always|asked_denied_once|asked_allowed_unknown","source":"native","tool":"<name>","tool_use_id":"<id>"}`. Same append-safe write semantics as PreToolUse.
-- [ ] + unlink the breadcrumb after processing (success or error). Never leave orphans.
-- [ ] + fail-open behaviour: any error in PostToolUse -> diagnostic to stderr, exit 0 with `{"continue": true}`. Audit failures must not affect tool outcomes.
-- [ ] + bats tests: breadcrumb -> tool_response success + settings unchanged = `asked_allowed_once`; settings changed with matching new rule = `asked_allowed_always`; settings changed with unrelated rule = `asked_allowed_unknown`; tool_response shows permission blocked = `asked_denied_once`; no breadcrumb = no-op; audit disabled = no-op regardless of breadcrumb (self-heal - unlink only); malformed breadcrumb -> stderr + no-op + unlink.
-- [ ] + run tests - must pass before task 5.
+- [x] + write JSONL line to `~/.claude/passthru-audit.log`: `{"ts":"...","event":"asked_allowed_always|asked_allowed_once|asked_denied_always|asked_denied_once|asked_allowed_unknown","source":"native","tool":"<name>","tool_use_id":"<id>"}`. Same append-safe write semantics as PreToolUse.
+- [x] + unlink the breadcrumb after processing (success or error). Never leave orphans.
+- [x] + fail-open behaviour: any error in PostToolUse -> diagnostic to stderr, exit 0 with `{"continue": true}`. Audit failures must not affect tool outcomes.
+- [x] + bats tests: breadcrumb -> tool_response success + settings unchanged = `asked_allowed_once`; settings changed with matching new rule = `asked_allowed_always`; settings changed with unrelated rule = `asked_allowed_unknown`; tool_response shows permission blocked = `asked_denied_once`; no breadcrumb = no-op; audit disabled = no-op regardless of breadcrumb (self-heal - unlink only); malformed breadcrumb -> stderr + no-op + unlink.
+- [x] + run tests - must pass before task 5.
 
 ### Task 5: Rule verifier + atomic write wrapper
 
