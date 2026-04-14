@@ -261,14 +261,18 @@ convert_settings_file() {
   fi
 
   local -a rules=()
-  local i entry converted
-  for ((i = 0; i < n; i++)); do
-    entry="$(jq -r ".[$i]" <<<"$allow_json")"
+  local entry converted
+  # Stream each allow entry as a single jq pass (one fork instead of N).
+  # `jq -r '.[]'` emits each element as its native shape (raw string for
+  # strings, JSON for anything else). convert_rule only needs the string
+  # form; non-string entries are warned about and dropped downstream.
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    [ -z "$entry" ] && continue
     converted="$(convert_rule "$entry")"
     if [ -n "$converted" ]; then
       rules+=("$converted")
     fi
-  done
+  done < <(jq -r '.[]' <<<"$allow_json" 2>/dev/null)
 
   if [ "${#rules[@]}" -eq 0 ]; then
     printf '[]\n'

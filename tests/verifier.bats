@@ -174,7 +174,7 @@ EOF
 EOF
   run_verify
   [ "$status" -eq 0 ]
-  [[ "$output" == *"duplicate"* ]] || [[ "$output" == *"WARN"* ]]
+  [[ "$output" == *"duplicate"* ]]
 }
 
 @test "check 4 duplicates: same rule within one file -> warn" {
@@ -215,8 +215,10 @@ EOF
   place "$USER_ROOT/.claude/passthru.json" "shadowed-rule.json"
   run_verify
   [ "$status" -eq 0 ]
-  [[ "$output" == *"shadow"* ]]
-  [[ "$output" == *"rule 2"* ]] || [[ "$output" == *"index 0"* ]]
+  [[ "$output" == *"shadowing:"* ]]
+  # Explicit form: "rule N shadowed by earlier identical rule at index M".
+  # Accept any N>=1 and M<N (fixture has 3 identical rules at indices 0,1,2).
+  [[ "$output" =~ rule\ [0-9]+\ shadowed\ by ]]
 }
 
 # ---------------------------------------------------------------------------

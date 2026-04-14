@@ -545,6 +545,56 @@ write_settings() {
   [ "$output" = "asked_allowed_always" ]
 }
 
+@test "entry_matches_call: Read(/tmp/dir:*) prefix matches Read on /tmp/dir/file.txt" {
+  enable_audit
+  write_breadcrumb "tidRD" "Read" '{"file_path":"/tmp/dir/file.txt"}' "" ""
+  # Native-permissions Read entry with directory-prefix glob form.
+  write_settings "$USER_ROOT/.claude/settings.json" '["Read(/tmp/dir:*)"]' '[]'
+  run_handler '{"tool_name":"Read","tool_input":{"file_path":"/tmp/dir/file.txt"},"tool_use_id":"tidRD","tool_response":{"type":"text","file":{}}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
+@test "entry_matches_call: Edit(/etc/hosts) literal path matches Edit on that path" {
+  enable_audit
+  write_breadcrumb "tidED" "Edit" '{"file_path":"/etc/hosts"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["Edit(/etc/hosts)"]' '[]'
+  run_handler '{"tool_name":"Edit","tool_input":{"file_path":"/etc/hosts"},"tool_use_id":"tidED","tool_response":{"ok":true}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
+@test "entry_matches_call: Edit(/different) path does NOT match Edit on /etc/hosts" {
+  enable_audit
+  write_breadcrumb "tidED2" "Edit" '{"file_path":"/etc/hosts"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["Edit(/different)"]' '[]'
+  run_handler '{"tool_name":"Edit","tool_input":{"file_path":"/etc/hosts"},"tool_use_id":"tidED2","tool_response":{"ok":true}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_unknown" ]
+}
+
+@test "entry_matches_call: unknown tool with coincidental substring -> unknown, not always" {
+  enable_audit
+  # Fictional MCP tool call; mcp__x__y is neither Bash, WebFetch, nor a
+  # file-path tool. The entry_arg ("hello") would substring-match the
+  # message field under the old wildcard fallback and wrongly classify as
+  # asked_allowed_always. Under the tightened fallback, unknown tools
+  # always return 1 -> classify as asked_allowed_unknown.
+  write_breadcrumb "tidMCP" "mcp__x__y" '{"message":"hello world"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["mcp__x__y(hello)"]' '[]'
+  run_handler '{"tool_name":"mcp__x__y","tool_input":{"message":"hello world"},"tool_use_id":"tidMCP","tool_response":{"ok":true}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_unknown" ]
+}
+
 # ---------------------------------------------------------------------------
 # tool_use_id sanitization (path-traversal guard)
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ Related patterns found:
 - Existing community hooks (kornysietsma/claude-code-permissions-hook, hirano00o/gatehook) solve half the problem but lack scope merging and plugin packaging.
 
 Dependencies identified:
-- `bash` 4.0+, `jq`, PCRE regex engine (via `grep -P` on GNU systems or `perl` fallback on BSD/macOS where grep lacks `-P`). `bats-core` for tests. All available on macOS/Linux by default (perl is preinstalled).
+- `bash` 3.2+ (the default on macOS), `jq`, `perl` 5+ as the PCRE regex engine (used unconditionally; avoids BSD-vs-GNU `grep -P` divergence on macOS). `bats-core` for tests. All available on macOS/Linux by default (perl is preinstalled).
 
 ## Development Approach
 
@@ -95,7 +95,7 @@ Rule matching semantics:
 - Merge semantics: deny and allow arrays from all four files (user `passthru.json`, user `passthru.imported.json`, project `passthru.json`, project `passthru.imported.json`) are concatenated. Both scopes contribute; neither overrides.
 
 Key design decisions:
-- **Shell-based handler** (not Rust/Node): zero install friction, matches ticktock convention, easy to audit. jq + grep -P cover all needs.
+- **Shell-based handler** (not Rust/Node): zero install friction, matches ticktock convention, easy to audit. jq + perl (PCRE) cover all needs.
 - **Dedicated verifier** (`scripts/verify.sh`): deterministic correctness checks in one pass across all scopes. Invoked automatically on every write (via `write-rule.sh`) and on demand via `/passthru:verify`. Catches errors before they reach the hot path, so the hook-time loader can stay fast (parse + minimal schema check only).
 - **Atomic write wrapper** (`scripts/write-rule.sh`): isolates backup + append + verify + rollback into one deterministic shell script. Slash command prompts cannot reliably roll back via in-session variables (plan review finding), so the correctness lives in shell and the prompt only orchestrates.
 - **Separate imported-rules file** per scope (`passthru.imported.json`): bootstrap never touches user-authored `passthru.json`, so re-imports are idempotent.
@@ -209,7 +209,7 @@ File locations:
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/fixtures/imported-and-authored.json`
 
 - [x] implement `load_rules` in `common.sh` that reads up to four files (`~/.claude/passthru.json`, `~/.claude/passthru.imported.json`, `$CWD/.claude/passthru.json`, `$CWD/.claude/passthru.imported.json`), tolerates missing, concatenates `.allow` and `.deny` arrays via `jq -s`, and outputs merged JSON on stdout.
-- [x] implement `validate_rules <json>`: enforce `version: 1`, each entry has at least one of `tool` or `match`, each `match` value is a non-empty string. Do NOT pre-compile/validate PCRE at load time (per-rule `grep -P` roundtrips are slow and may reject valid user PCRE). Deep regex checks live in `scripts/verify.sh` (Task 5), not here. Regex errors at match time still surface with a clear message identifying the offending rule index.
+- [x] implement `validate_rules <json>`: enforce `version: 1`, each entry has at least one of `tool` or `match`, each `match` value is a non-empty string. Do NOT pre-compile/validate PCRE at load time (per-rule `perl -e 'qr//'` roundtrips are slow and may reject valid user PCRE). Deep regex checks live in `scripts/verify.sh` (Task 5), not here. Regex errors at match time still surface with a clear message identifying the offending rule index.
 - [x] handle: missing file (skip), empty file (treat as `{}`), malformed JSON (fail with file path).
 - [x] write bats tests: user-only, project-only, both scopes merging, imported + authored in same scope, missing files, malformed JSON, schema violation.
 - [x] write tests for deny+allow ordering preservation across all four files.
@@ -222,14 +222,14 @@ File locations:
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/common_match.bats`
 
 - [x] implement `match_rule <tool_name> <tool_input_json> <rule_json>` returning 0 on match, 1 on no match.
-- [x] check `tool` regex against `tool_name` using `grep -P` (or perl fallback on BSD/macOS where grep lacks `-P`). Absent/empty = match any.
-- [x] for each key in `match`: extract the corresponding field from `tool_input` via `jq -r`; if field is null or missing, rule fails; else regex-match with `grep -P` (or perl fallback).
+- [x] check `tool` regex against `tool_name` using `perl` (PCRE). Absent/empty = match any.
+- [x] for each key in `match`: extract the corresponding field from `tool_input` via `jq -r`; if field is null or missing, rule fails; else regex-match with `perl`.
 - [x] empty or absent `match` = match any input.
 - [x] implement `find_first_match <rules_array_json> <tool_name> <tool_input>` returning the first matching rule JSON, or empty on no match. Caller extracts `.allow` or `.deny` with jq before passing in - no in-function jq path indirection.
 - [x] write bats tests covering: Bash command regex, Read file_path regex, WebFetch url regex, MCP tool name regex, multi-field match (AND), absent match field, field missing from tool_input (no match), invalid regex (error).
 - [x] run tests - must pass before task 4.
 
-Implementation note: macOS ships BSD grep without `-P`. Implementation uses `perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/'` as the PCRE backend (perl is preinstalled on macOS and Linux). Exit codes: 0=match, 1=no-match, 2=bad-regex. Bad-regex errors from `find_first_match` print the offending rule index to stderr. README (Task 10) should note the perl runtime dependency.
+Implementation note: macOS ships BSD grep without `-P`, so the matcher uses perl unconditionally across all platforms via `perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/'` (perl is preinstalled on macOS and Linux). Exit codes: 0=match, 1=no-match, 2=bad-regex. Bad-regex errors from `find_first_match` print the offending rule index to stderr. README (Task 10) should note the perl runtime dependency.
 
 ### Task 4: Hook handler (pre-tool-use.sh)
 
@@ -292,7 +292,7 @@ Verifier (`verify.sh`):
 - [x] loads all four rule files (user + project, authored + imported), runs checks across the merged set, prints a structured report, exits 0 on clean / 1 on any error / 2 on warnings only (only if `--strict`).
 - [x] **check 1 parse:** every existing file parses as JSON (fail with file path + jq error on parse fail).
 - [x] **check 2 schema:** each rule has `tool` or `match`, types match spec, `version: 1`.
-- [x] **check 3 regex compile:** every `tool` regex and every `match.*` regex is tested with `grep -P '' </dev/null` (compile-only, no matching). On syntax error, report file path + rule index + offending pattern + grep's error.
+- [x] **check 3 regex compile:** every `tool` regex and every `match.*` regex is tested with `perl -e 'qr/.../'` (compile-only, no matching). On syntax error, report file path + rule index + offending pattern + perl's error.
 - [x] **check 4 duplicates:** exact-duplicate rules (same tool + same match object) across all scopes -> warn (not always wrong, but surfaced so the user can prune).
 - [x] **check 5 deny/allow conflict:** identical tool + match present in both `.deny[]` and `.allow[]` across any scope -> error (user intent unclear; deny wins silently would be worse than explicit failure).
 - [x] **check 6 shadowing:** within a single allow[] or deny[] array (post-merge), if rule at index i has the exact same tool+match as rule at some index j<i, warn "rule N shadowed by earlier identical rule at index M". Formal regex-subset detection is undecidable; this heuristic catches the common case.
@@ -305,7 +305,7 @@ Atomic write wrapper (`write-rule.sh`):
 - [x] signature: `write-rule.sh <scope> <list> <rule_json>` where `scope` is `user|project` and `list` is `allow|deny`.
 - [x] resolve target `passthru.json` path, create if missing with `{"version":1,"allow":[],"deny":[]}`.
 - [x] take a backup to a temp file, append the rule to the chosen list, run `scripts/verify.sh --quiet`, on verifier failure **restore backup atomically** and exit non-zero with the verifier's error on stderr, on success delete the backup and exit 0.
-- [x] handle concurrent writes with a lock file (`~/.claude/passthru.write.lock`, 5s timeout, released via `trap`).
+- [x] handle concurrent writes with a lock **directory** (`~/.claude/passthru.write.lock.d`, 5s timeout, released via `trap`). Uses `mkdir`, which is atomic on every POSIX filesystem, so flock(1) is not required.
 - [x] write bats tests: happy path (rule appended, file valid), invalid regex (backup restored, non-zero exit, no file corruption), missing target file (created with correct shape), concurrent write serialization.
 - [x] run tests - must pass before task 6.
 
@@ -362,7 +362,7 @@ Atomic write wrapper (`write-rule.sh`):
 
 - [x] + implement `scripts/log.sh`: reads `~/.claude/passthru-audit.log` (override path via `--file`), formats JSONL entries for human viewing.
 - [x] + flags:
-  - `--since <value>`: filter by time. Accepts ISO 8601 (`2026-04-14T00:00:00Z`), relative (`1h`, `24h`, `7d`), or `today`.
+  - `--since <value>`: filter by time. Accepts ISO 8601 (`2026-04-14T00:00:00Z`), relative (`5m`, `1h`, `24h`, `7d`, `30d`), or `today`.
   - `--event <pattern>`: filter by event. Value is a regex matched against the `event` field. Examples: `allow`, `deny`, `^asked_`, `asked_allowed_(once|always)`.
   - `--tool <pattern>`: regex against `tool` field.
   - `--format table|json|raw`: default `table` (pretty columns, ANSI colors only when stdout is a tty), `json` emits the filtered entries as a JSON array, `raw` passes through JSONL unchanged.

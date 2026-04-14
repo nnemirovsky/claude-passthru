@@ -69,7 +69,7 @@ Runtime dependencies the plugin needs on the user's machine.
 
 ## First-run bootstrap
 
-The plugin ships a bootstrap script that converts existing native `permissions.allow` entries from `settings.json` files into passthru rule files. Run it once after install to avoid starting from zero.
+The plugin ships a bootstrap script that converts existing native `permissions.allow` entries into passthru rule files. The script reads up to three settings files: the user-scope `~/.claude/settings.json`, the project-scope shared `./.claude/settings.json`, and the project-scope local `./.claude/settings.local.json`. Run it once after install to avoid starting from zero.
 
 Dry run first (prints proposed rules to stdout, writes nothing):
 
@@ -277,7 +277,7 @@ bash scripts/log.sh --format raw | jq .
 * **Disable every rule without uninstalling.** `touch ~/.claude/passthru.disabled` turns the plugin into a no-op (the hook sees the sentinel and returns passthrough immediately). Remove the file to re-enable.
 * **Bad rules after a manual edit.** Run `/passthru:verify` or `bash scripts/verify.sh` to see exactly which file, path, and message failed.
 * **Rules are not firing.** Launch Claude Code with `claude --debug` and watch the hook output. The handler prints its decision reason to stderr, which `--debug` surfaces.
-* **Concurrent writes or a stuck lock.** `scripts/write-rule.sh` serializes writers under a single user-scope lock at `~/.claude/passthru.write.lock` (with `flock(1)` when available) or the directory `~/.claude/passthru.write.lock.d` (mkdir-based fallback on systems without `flock`). If the process that held the lock died without releasing it, remove that file or directory manually. Lock-acquisition timeout defaults to 5 seconds and can be overridden via `PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment.
+* **Concurrent writes or a stuck lock.** `scripts/write-rule.sh` serializes writers under a single user-scope lock at the directory `~/.claude/passthru.write.lock.d`. The lock uses `mkdir`, which is atomic on every POSIX filesystem, so no `flock(1)` is required. If the process that held the lock died without releasing it, remove the directory manually (`rmdir ~/.claude/passthru.write.lock.d`). Lock-acquisition timeout defaults to 5 seconds and can be overridden via `PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment.
 
 ## License
 

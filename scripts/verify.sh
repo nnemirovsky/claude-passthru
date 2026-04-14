@@ -397,16 +397,6 @@ fi
 
 # Check 6: shadowing within the merged list. Reuses the merged_allow /
 # merged_deny arrays we just built (zero extra jq forks per file).
-build_merged_list() {
-  # $1 = "allow" | "deny"
-  local list="$1"
-  if [ -z "${GROUP_REPORT:-}" ]; then
-    printf '[]'
-    return 0
-  fi
-  jq -c --arg k "merged_${list}" '.[$k]' <<<"$GROUP_REPORT"
-}
-
 check_shadowing_in_list() {
   # $1 = list name (for message), $2 = merged JSON array
   # Build canonical identity strings for every entry once (one jq fork per
@@ -434,9 +424,9 @@ check_shadowing_in_list() {
   done
 }
 
-if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
-  merged_allow="$(build_merged_list allow)"
-  merged_deny="$(build_merged_list deny)"
+if [ "${#PARSED_FILES[@]}" -gt 0 ] && [ -n "${GROUP_REPORT:-}" ]; then
+  merged_allow="$(jq -c '.merged_allow' <<<"$GROUP_REPORT")"
+  merged_deny="$(jq -c '.merged_deny'  <<<"$GROUP_REPORT")"
   check_shadowing_in_list allow "$merged_allow"
   check_shadowing_in_list deny "$merged_deny"
 fi

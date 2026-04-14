@@ -203,21 +203,18 @@ entry_matches_call() {
       # `mcp__git:status`) is preserved instead of being lopped off.
       local prefix="${entry_arg%:\*}"
       [ -z "$prefix" ] && return 1
-      # Extract the first token from the tool_input.command.
-      local cmd first_tok
+      # Extract the command string from the tool_input.
+      local cmd
       cmd="$(jq -r '.command // ""' <<<"$tool_input" 2>/dev/null || echo '')"
       [ -z "$cmd" ] && return 1
-      # Leading token is everything up to first whitespace.
-      first_tok="${cmd%% *}"
       # prefix may itself contain a space (e.g. "gh pr"). Accept when cmd
-      # starts with prefix followed by a space or end-of-string.
+      # equals prefix exactly, or starts with prefix followed by a space.
+      # The prefix match already covers the "bare command name" case: if
+      # prefix is "ls" and cmd is "ls", the first alternative matches; if
+      # cmd is "ls -la", the second matches.
       case "$cmd" in
         "$prefix"|"$prefix "*) return 0 ;;
       esac
-      # Also accept first-token equality so bare "Bash(ls:*)" matches "ls".
-      if [ "$first_tok" = "$prefix" ]; then
-        return 0
-      fi
       return 1
       ;;
     WebFetch)
@@ -236,17 +233,27 @@ entry_matches_call() {
       fi
       return 1
       ;;
-    *)
-      # Generic fallback: if entry_arg is a non-empty substring of the first
-      # string value in tool_input, call it tailored.
-      # Empty entry_arg has no signal -> not tailored, otherwise we would
-      # mark every call to that tool as tailored to a generic Tool() entry.
+    Read|Edit|Write)
+      # File-path tools: entry_arg is compared against tool_input.file_path.
+      # Claude Code's native permissions for Read/Edit/Write use file path or
+      # glob strings, so we check prefix equality (with optional ":*" suffix)
+      # and literal-path equality against the tool_input.file_path.
       [ -z "$entry_arg" ] && return 1
-      local any_val
-      any_val="$(jq -r '[.. | strings] | .[0] // ""' <<<"$tool_input" 2>/dev/null || echo '')"
-      case "$any_val" in
-        *"$entry_arg"*) return 0 ;;
+      local prefix="${entry_arg%:\*}"
+      [ -z "$prefix" ] && return 1
+      local fp
+      fp="$(jq -r '.file_path // ""' <<<"$tool_input" 2>/dev/null || echo '')"
+      [ -z "$fp" ] && return 1
+      case "$fp" in
+        "$prefix"|"$prefix"/*) return 0 ;;
       esac
+      return 1
+      ;;
+    *)
+      # Unknown tool: we cannot confidently determine whether a native
+      # permissions entry covers this call. Return no-match so the caller
+      # classifies the outcome as asked_allowed_unknown rather than guessing
+      # asked_allowed_always on a tenuous substring coincidence.
       return 1
       ;;
   esac

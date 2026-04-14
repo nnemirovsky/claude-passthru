@@ -498,23 +498,46 @@ EOF
   run_log --enable
   [ "$status" -eq 0 ]
   [ -e "$SENT_PATH" ]
-  # Capture mtime to make sure the second enable does not blow it away.
-  local mtime_before mtime_after
-  if [ "$(uname -s)" = "Darwin" ]; then
-    mtime_before="$(stat -f '%m' "$SENT_PATH")"
-  else
-    mtime_before="$(stat -c '%Y' "$SENT_PATH")"
-  fi
+  # Second --enable: file must still exist and exit status must be 0.
+  # (touch(1) bumps mtime on a second call; we do not assert mtime here.)
   run_log --enable
   [ "$status" -eq 0 ]
   [ -e "$SENT_PATH" ]
-  if [ "$(uname -s)" = "Darwin" ]; then
-    mtime_after="$(stat -f '%m' "$SENT_PATH")"
-  else
-    mtime_after="$(stat -c '%Y' "$SENT_PATH")"
-  fi
-  # touch(1) bumps mtime; the file still exists. We do not assert mtime
-  # equality because touch is supposed to update it. We do assert the
-  # second call did not error.
-  [ -n "$mtime_after" ]
+}
+
+# ---------------------------------------------------------------------------
+# date_local helper (exercised through the table renderer)
+# ---------------------------------------------------------------------------
+# date_local is the small BSD-vs-GNU date wrapper used by iso_to_local_display.
+# Directly unit-testing a function inside log.sh would require refactoring the
+# script to be sourceable without side effects. Instead we assert on its
+# observable output through the table renderer, which invokes date_local
+# exactly twice per row for the today-vs-older branch.
+
+@test "date_local: today's entry renders as HH:MM:SS in table output" {
+  write_fixture
+  run_log --format table
+  [ "$status" -eq 0 ]
+  # Find the 'asked_allowed_once' row (that one is "now" in the fixture).
+  # Its time column must match HH:MM:SS not YYYY-MM-DD HH:MM.
+  local line time_col
+  line="$(printf '%s\n' "$output" | grep 'asked_allowed_once' | head -n1)"
+  [ -n "$line" ]
+  time_col="$(printf '%s' "$line" | awk -F ' \\| ' '{print $1}' | sed 's/[[:space:]]*$//')"
+  [[ "$time_col" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "date_local: older-than-today entry renders as YYYY-MM-DD HH:MM" {
+  # Synthetic log with a timestamp clearly in a past year so the today-vs-old
+  # branch always falls on "old". 2020-01-15T12:34:00Z is well in the past.
+  printf '%s\n' '{"ts":"2020-01-15T12:34:00Z","event":"allow","source":"passthru","tool":"Bash","reason":"old","rule_index":0,"tool_use_id":"legacy1"}' \
+    > "$LOG_PATH"
+  run_log --format table
+  [ "$status" -eq 0 ]
+  local line time_col
+  line="$(printf '%s\n' "$output" | grep 'legacy1\|old' | head -n1)"
+  [ -n "$line" ]
+  time_col="$(printf '%s' "$line" | awk -F ' \\| ' '{print $1}' | sed 's/[[:space:]]*$//')"
+  # Expect YYYY-MM-DD HH:MM, 16 chars with one space between date and time.
+  [[ "$time_col" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}$ ]]
 }

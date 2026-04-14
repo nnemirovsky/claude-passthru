@@ -48,14 +48,7 @@ fi
 # ---------------------------------------------------------------------------
 # passthru_user_home and audit_log_path live in common.sh; reuse them so the
 # log viewer cannot drift from the hook handlers' notion of "where the log is".
-
-default_log_path() {
-  audit_log_path
-}
-
-sentinel_path() {
-  printf '%s/.claude/passthru.audit.enabled\n' "$(passthru_user_home)"
-}
+# The sentinel path is a one-liner, no helper needed.
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -320,38 +313,31 @@ render_table() {
   # Header
   printf '%-19s | %-22s | %-7s | %-18s | %s\n' 'time' 'event' 'source' 'tool' 'reason/detail'
   printf '%s\n' '-------------------------------------------------------------------------------------------'
-  local line
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -z "$line" ] && continue
-    local ts event source tool reason rule_index detail color
-    ts="$(jq -r '.ts // ""' <<<"$line" 2>/dev/null || echo '')"
-    event="$(jq -r '.event // ""' <<<"$line" 2>/dev/null || echo '')"
-    source="$(jq -r '.source // ""' <<<"$line" 2>/dev/null || echo '')"
-    tool="$(jq -r '.tool // ""' <<<"$line" 2>/dev/null || echo '')"
-    reason="$(jq -r '.reason // ""' <<<"$line" 2>/dev/null || echo '')"
-    rule_index="$(jq -r '.rule_index // empty' <<<"$line" 2>/dev/null || echo '')"
-
+  # Extract all fields from the entire stream in a single jq invocation
+  # (TSV-separated), then parse in bash. Previously we forked jq 6x per
+  # entry; at 1000 entries that was 6000 forks. Now it is one fork total.
+  # jq emits "-" for numeric empty so we can rely on tab splitting even
+  # when rule_index is absent.
+  local use_color=0
+  if tty_color; then use_color=1; fi
+  local ts event source tool reason rule_index tuid detail color time_str
+  while IFS=$'\t' read -r ts event source tool reason rule_index tuid || [ -n "$ts" ]; do
+    [ -z "$ts$event$source$tool" ] && continue
     if [ -n "$reason" ]; then
       detail="$reason"
+    elif [ -n "$tuid" ]; then
+      detail="$(truncate_str "$tuid" 24)"
     else
-      # Fall back to tool_use_id short form for asked_* events.
-      local tuid
-      tuid="$(jq -r '.tool_use_id // ""' <<<"$line" 2>/dev/null || echo '')"
-      if [ -n "$tuid" ]; then
-        detail="$(truncate_str "$tuid" 24)"
-      else
-        detail=""
-      fi
+      detail=""
     fi
     if [ -n "$rule_index" ]; then
       detail="[#${rule_index}] ${detail}"
     fi
     detail="$(truncate_str "$detail" 60)"
 
-    local time_str
     time_str="$(iso_to_local_display "$ts" "$today")"
 
-    if tty_color; then
+    if [ "$use_color" -eq 1 ]; then
       color="$(color_for_event "$event")"
       printf "${color}%-19s | %-22s | %-7s | %-18s | %s${reset}\n" \
         "$time_str" "$event" "$source" "$(truncate_str "$tool" 18)" "$detail"
@@ -359,7 +345,15 @@ render_table() {
       printf '%-19s | %-22s | %-7s | %-18s | %s\n' \
         "$time_str" "$event" "$source" "$(truncate_str "$tool" 18)" "$detail"
     fi
-  done
+  done < <(jq -r '[
+    (.ts // ""),
+    (.event // ""),
+    (.source // ""),
+    (.tool // ""),
+    (.reason // ""),
+    (if (.rule_index // null) == null then "" else (.rule_index | tostring) end),
+    (.tool_use_id // "")
+  ] | @tsv' 2>/dev/null)
 }
 
 render_json() {
@@ -460,8 +454,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-LOG_PATH="${ARG_FILE:-$(default_log_path)}"
-SENT_PATH="$(sentinel_path)"
+LOG_PATH="${ARG_FILE:-$(audit_log_path)}"
+SENT_PATH="$(passthru_user_home)/.claude/passthru.audit.enabled"
 
 # ---------------------------------------------------------------------------
 # Sentinel-toggle actions

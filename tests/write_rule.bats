@@ -140,9 +140,10 @@ run_write() {
 EOF
   ORIG="$(cat "$(user_file)")"
 
-  run_write user allow '{"tool":"Bash","match":{"command":"["}}'
+  # Run with stderr merged into stdout so we can assert on it directly.
+  run bash -c "bash '$WRITE' user allow '{\"tool\":\"Bash\",\"match\":{\"command\":\"[\"}}' 2>&1"
   [ "$status" -ne 0 ]
-  [[ "${output}${stderr:-}" == *"verifier"* ]] || run bash -c "bash '$WRITE' user allow '{\"tool\":\"Bash\",\"match\":{\"command\":\"[\"}}' 2>&1"
+  [[ "$output" == *"verifier"* ]]
   # File must be byte-for-byte identical to the original.
   AFTER="$(cat "$(user_file)")"
   [ "$ORIG" = "$AFTER" ]
