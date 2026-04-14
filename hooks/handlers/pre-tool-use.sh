@@ -230,18 +230,58 @@ audit_gc_breadcrumbs
 
 # --- 3. Plugin self-allow --------------------------------------------------
 # Hardcoded allow for the plugin's own scripts so slash commands do not hit
-# the native permission dialog. Matches e.g.:
-#   bash /Users/foo/.claude/plugins/cache/umputun/claude-passthru/1.0.0/plugins/claude-passthru/scripts/verify.sh
-# We only self-allow Bash calls; other tools would not invoke our scripts.
+# the native permission dialog. We only self-allow Bash calls; other tools
+# would not invoke our scripts.
+#
+# Primary check: $CLAUDE_PLUGIN_ROOT (set by Claude Code on every hook
+# invocation) is the authoritative install path, so it works across all
+# install shapes. Real installs live at
+#   ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/
+# not `.../claude-passthru/...` - the hardcoded repo-name regex we used
+# previously never matched real installs and forced every slash command
+# into the native permission dialog.
+#
+# Fallback: a broadened regex that accepts `passthru` as any path segment
+# under .claude/plugins/, for the rare case where $CLAUDE_PLUGIN_ROOT is
+# unset (manual pipe-testing, legacy harnesses).
 if [ "$TOOL_NAME" = "Bash" ]; then
   SELF_CMD="$(jq -r '.command // ""' <<<"$TOOL_INPUT" 2>/dev/null)"
   if [ -n "$SELF_CMD" ]; then
-    # Plugin install path on disk is ~/.claude/plugins/... so the leading dot
-    # in .claude must be escaped for regex (literal dot).
-    SELF_RE='^bash /.*/\.claude/plugins/.*/claude-passthru/scripts/[a-z-]+\.sh( |$)'
-    if pcre_match "$SELF_CMD" "$SELF_RE"; then
+    SELF_ALLOWED=0
+    SELF_PATTERN=""
+
+    if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+      SELF_PREFIX="bash ${CLAUDE_PLUGIN_ROOT}/scripts/"
+      case "$SELF_CMD" in
+        "$SELF_PREFIX"*)
+          stripped="${SELF_CMD#"$SELF_PREFIX"}"
+          script="${stripped%% *}"
+          case "$script" in
+            verify.sh|write-rule.sh|bootstrap.sh|log.sh)
+              SELF_ALLOWED=1
+              SELF_PATTERN="CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT}"
+              ;;
+          esac
+          ;;
+      esac
+    fi
+
+    if [ "$SELF_ALLOWED" -eq 0 ]; then
+      # Fallback regex for environments where $CLAUDE_PLUGIN_ROOT is not set.
+      # Accepts either `passthru` or `claude-passthru` anywhere after
+      # .claude/plugins/ and before /scripts/, covering the real install
+      # shape (cache/<marketplace>/passthru/<ver>/scripts/) and the legacy
+      # repo-name shape (.../claude-passthru/scripts/).
+      SELF_RE='^bash /.*/\.claude/plugins/.*(claude-passthru|/passthru/).*/scripts/[a-z-]+\.sh( |$)'
+      if pcre_match "$SELF_CMD" "$SELF_RE"; then
+        SELF_ALLOWED=1
+        SELF_PATTERN="$SELF_RE"
+      fi
+    fi
+
+    if [ "$SELF_ALLOWED" -eq 1 ]; then
       emit_decision "allow" "passthru self-allow: plugin script"
-      audit_write_line "allow" "$TOOL_NAME" "passthru self-allow" "" "$SELF_RE" "$TOOL_USE_ID"
+      audit_write_line "allow" "$TOOL_NAME" "passthru self-allow" "" "$SELF_PATTERN" "$TOOL_USE_ID"
       exit 0
     fi
   fi
