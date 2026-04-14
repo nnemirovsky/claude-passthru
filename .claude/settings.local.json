@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(brew list:*)",
+      "Bash(bats --version)",
+      "Bash(bats:*)",
+      "Bash(/opt/homebrew/bin/ggrep --version)",
+      "Bash(/opt/homebrew/bin/ggrep -P 'test')",
+      "Bash(perl -ne 'exit 1 unless /^test\\\\d+$/')",
+      "Bash(python3 -c \"import sys, re; sys.exit\\(0 if re.search\\(r'^test$', sys.stdin.read\\(\\).rstrip\\(\\)\\) else 1\\)\")",
+      "Bash(jq --version)",
+      "Bash(perl --version)",
+      "Bash(perl -e 'exit\\(1\\) unless $ARGV[0] =~ /$ARGV[1]/' 'bash /Users/foo/.claude/plugins/cache/owner/claude-passthru/scripts/verify.sh --quiet' '^bash /.*/\\\\.claude/plugins/.*/claude-passthru/scripts/[a-z-]+\\\\.sh\\( |$\\)')",
+      "Bash(echo \"exit=$?\")",
+      "Bash(command -v bats)",
+      "Bash(gh auth:*)"
+    ]
+  }
+}

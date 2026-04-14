@@ -2,7 +2,7 @@
 
 Regex-based permission rules for Claude Code via hooks.
 
-[![CI](https://github.com/nnemirovsky/claude-passthru/actions/workflows/ci.yml/badge.svg)](https://github.com/nnemirovsky/claude-passthru/actions/workflows/ci.yml)
+[![Tests](https://github.com/nnemirovsky/claude-passthru/actions/workflows/tests.yml/badge.svg)](https://github.com/nnemirovsky/claude-passthru/actions/workflows/tests.yml)
 [![Release](https://img.shields.io/github/v/release/nnemirovsky/claude-passthru)](https://github.com/nnemirovsky/claude-passthru/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
