@@ -387,18 +387,18 @@ Atomic write wrapper (`write-rule.sh`):
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/bootstrap.bats`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/fixtures/settings-with-allow.json`
 
-- [ ] implement `bootstrap.sh` that scans `~/.claude/settings.json` + `$CWD/.claude/settings.local.json` + `$CWD/.claude/settings.json` for `permissions.allow` entries.
-- [ ] write imported rules to a separate file per scope: `~/.claude/passthru.imported.json` (user) and `.claude/passthru.imported.json` (project). The hook's loader (Task 2) already merges these alongside the authored files.
-- [ ] convert simple `Bash(prefix:*)` rules into: `{ tool: "Bash", match: { command: "^<escaped-prefix>(\\s|$)" }, reason: "imported from settings" }`. Skip patterns that would require manual regex conversion (containing spaces beyond the prefix, etc.).
-- [ ] convert `mcp__server__tool` exact rules into `{ tool: "^mcp__server__tool$", reason: "imported" }`.
-- [ ] convert `WebFetch(domain:x.com)` into `{ tool: "WebFetch", match: { url: "^https?://([^/.]+\\.)*x\\.com(/|$)" }, reason: "imported" }` - the stricter regex prevents `evilx.com` from matching when the user allowed `x.com`.
-- [ ] default mode: print proposed rules to stdout for review; `--write` flag to replace `passthru.imported.json` (authored `passthru.json` is never touched).
-- [ ] **after `--write` completes, invoke `scripts/verify.sh --quiet`**. If verifier fails, preserve the previous `.imported.json` (restored from a temp backup taken before the write), print the verifier error, and exit non-zero.
-- [ ] write bats tests: fixture settings.json with a mix of Bash prefix rules, MCP rules, WebFetch rules, exact-command rules. Verify output JSON.
-- [ ] test edge cases: empty allow list, malformed settings.json, re-run on existing `passthru.imported.json` (replaces cleanly; hand-written `passthru.json` unchanged).
-- [ ] regression test: verify `evilx.com` does NOT match an imported `x.com` rule.
-- [ ] regression test: verify bootstrap writes + verifier-pass round-trip (chain passes end-to-end).
-- [ ] run tests - must pass before task 10.
+- [x] implement `bootstrap.sh` that scans `~/.claude/settings.json` + `$CWD/.claude/settings.local.json` + `$CWD/.claude/settings.json` for `permissions.allow` entries.
+- [x] write imported rules to a separate file per scope: `~/.claude/passthru.imported.json` (user) and `.claude/passthru.imported.json` (project). The hook's loader (Task 2) already merges these alongside the authored files.
+- [x] convert simple `Bash(prefix:*)` rules into: `{ tool: "Bash", match: { command: "^<escaped-prefix>(\\s|$)" }, reason: "imported from settings" }`. Skip patterns that would require manual regex conversion (containing spaces beyond the prefix, etc.).
+- [x] convert `mcp__server__tool` exact rules into `{ tool: "^mcp__server__tool$", reason: "imported" }`.
+- [x] convert `WebFetch(domain:x.com)` into `{ tool: "WebFetch", match: { url: "^https?://([^/.]+\\.)*x\\.com(/|$)" }, reason: "imported" }` - the stricter regex prevents `evilx.com` from matching when the user allowed `x.com`.
+- [x] default mode: print proposed rules to stdout for review; `--write` flag to replace `passthru.imported.json` (authored `passthru.json` is never touched).
+- [x] **after `--write` completes, invoke `scripts/verify.sh --quiet`**. If verifier fails, preserve the previous `.imported.json` (restored from a temp backup taken before the write), print the verifier error, and exit non-zero.
+- [x] write bats tests: fixture settings.json with a mix of Bash prefix rules, MCP rules, WebFetch rules, exact-command rules. Verify output JSON.
+- [x] test edge cases: empty allow list, malformed settings.json, re-run on existing `passthru.imported.json` (replaces cleanly; hand-written `passthru.json` unchanged).
+- [x] regression test: verify `evilx.com` does NOT match an imported `x.com` rule.
+- [x] regression test: verify bootstrap writes + verifier-pass round-trip (chain passes end-to-end).
+- [x] run tests - must pass before task 10.
 
 ### Task 10: README, CLAUDE.md, and usage documentation
 

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(ls:*)",
+      "Bash(brew list:*)",
+      "Bash(gh api:*)",
+      "Bash(echo hello)",
+      "mcp__context7__query-docs",
+      "mcp__google-maps__maps_geocode",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:x.com)",
+      "Bash(npm run test:unit)",
+      "Read(/tmp/foo)",
+      "ExactStrangeFormat"
+    ]
+  }
+}
