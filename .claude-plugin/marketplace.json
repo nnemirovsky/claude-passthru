@@ -1,0 +1,15 @@
+{
+  "name": "passthru",
+  "version": "0.1.0",
+  "description": "Regex-based permission rules for Claude Code via PreToolUse hook.",
+  "owner": {
+    "name": "nnemirovsky"
+  },
+  "plugins": [
+    {
+      "name": "passthru",
+      "source": "./",
+      "description": "Regex-based permission rules for Claude Code via PreToolUse hook. Supplements the native permission system with regex rules that the native glob syntax cannot express (directory prefixes, sub-arg matching, partial URL/path patterns, MCP tool namespaces)."
+    }
+  ]
+}
