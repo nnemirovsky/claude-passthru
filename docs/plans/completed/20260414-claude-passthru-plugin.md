@@ -492,10 +492,9 @@ Coverage summary: every acceptance check is either automated in the bats suite (
 - [x] update `README.md` with the `/plugin marketplace add nemirovsky/claude-passthru` install instruction. (path corrected to `nnemirovsky/claude-passthru` to match actual repo owner)
 - [x] move this plan to `docs/plans/completed/`.
 - [x] tag `v0.1.0` via `release-tools:new` skill (bump version in both manifests per Task 10 CLAUDE.md release workflow), push tag. (manifests already at 0.1.0 as plan expected; tag v0.1.0 + GitHub release created)
-- [ ] **prompt the user** (via AskUserQuestion) whether to:
-  - list plugin on a community marketplace (e.g., `claude-code-marketplace`). If yes, guide through the submission PR.
-  - post an announcement on anthropics/claude-code issue #37509 as a community workaround. If yes, draft the comment text and wait for user approval before `gh issue comment`.
-  Do not silently skip these - the user explicitly wanted to be prompted after manual verification completes. (pending orchestrator-side AskUserQuestion - left unchecked deliberately)
+- [x] **prompt the user** (via AskUserQuestion) whether to:
+  - list plugin on a community marketplace (user chose: not now)
+  - post an announcement on anthropics/claude-code issue #37509 (user chose: not now)
 
 ## Post-Completion
 
