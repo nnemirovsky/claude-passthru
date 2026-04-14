@@ -9,12 +9,14 @@ Developer-facing notes for future Claude sessions working on this repo.
   plugin.json          plugin manifest (name, version, description)
   marketplace.json     marketplace manifest (used when published)
 commands/
+  bootstrap.md         /passthru:bootstrap slash command (wraps scripts/bootstrap.sh with dry-run + confirm)
   add.md               /passthru:add slash command (prompt-based)
   suggest.md           /passthru:suggest slash command (prompt-based)
   verify.md            /passthru:verify slash command (prompt-based)
   log.md               /passthru:log slash command (prompt-based)
 hooks/
-  hooks.json           registers PreToolUse + PostToolUse handlers with matcher "*", timeout 10s each
+  hooks.json           registers PreToolUse + PostToolUse (timeout 10s each, matcher "*") and
+                       SessionStart (timeout 5s, no matcher) handlers
   common.sh            shared library. Functions:
                          * load_rules / validate_rules (merge + schema-check)
                          * pcre_match / match_rule / find_first_match (rule matching)
@@ -27,6 +29,9 @@ hooks/
   handlers/
     pre-tool-use.sh    main hook: loads rules, matches, emits allow/deny/passthrough
     post-tool-use.sh   classifies native-dialog outcomes into asked_* events (audit only)
+    session-start.sh   one-time bootstrap hint. Gated by ~/.claude/passthru.bootstrap-hint-shown
+                       marker. Prints to stderr only when the user has no passthru files yet
+                       AND has importable entries in ~/.claude/settings.json.
 scripts/
   bootstrap.sh         one-time importer from native permissions.allow into passthru.imported.json
   write-rule.sh        atomic write wrapper: backup + append + verify + rollback

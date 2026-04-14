@@ -319,6 +319,73 @@ frontmatter_value() {
 }
 
 # ---------------------------------------------------------------------------
+# Tests - commands/bootstrap.md
+# ---------------------------------------------------------------------------
+
+@test "commands/bootstrap.md exists" {
+  [ -f "$COMMANDS_DIR/bootstrap.md" ]
+}
+
+@test "commands/bootstrap.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/bootstrap.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/bootstrap.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/bootstrap.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/bootstrap.md frontmatter argument-hint mentions scope flags" {
+  run frontmatter_value "$COMMANDS_DIR/bootstrap.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--user-only"* ]]
+  [[ "$output" == *"--project-only"* ]]
+}
+
+@test "commands/bootstrap.md body mentions bootstrap.sh" {
+  run grep -q "bootstrap.sh" "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md body mentions verify.sh" {
+  run grep -q "verify.sh" "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md body mentions --write flag" {
+  run grep -q -- '--write' "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md body mentions \$ARGUMENTS pass-through" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md body mentions passthru.imported.json target" {
+  run grep -q 'passthru.imported.json' "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/bootstrap.md body mentions confirmation step" {
+  run grep -qi 'confirm' "$COMMANDS_DIR/bootstrap.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # Auto-iteration: every commands/*.md must have a well-formed frontmatter
 # block with non-empty description and argument-hint. Picks up new files
 # automatically so future command additions get baseline coverage.
