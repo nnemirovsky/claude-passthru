@@ -1,5 +1,5 @@
 {
-  "description": "passthru - regex-based permission rules for Claude Code (PreToolUse decision + PostToolUse audit)",
+  "description": "Regex-based permission rules for Claude Code via hooks",
   "hooks": {
     "PreToolUse": [
       {

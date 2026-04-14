@@ -1,39 +1,24 @@
 # passthru
 
-Regex-based permission rules for Claude Code via `PreToolUse` hook.
+Regex-based permission rules for Claude Code via hooks.
 
-`passthru` supplements the native permission system with regex rules that the native glob syntax cannot express. The hook reads merged user-scope and project-scope rule files and returns allow or deny decisions, bypassing the native permission dialog on match and falling through to it on miss. Works across every tool Claude Code exposes (`Bash`, `PowerShell`, `Read`, `Edit`, `Write`, `WebFetch`, MCP tools, and so on).
+[![CI](https://github.com/nnemirovsky/claude-passthru/actions/workflows/ci.yml/badge.svg)](https://github.com/nnemirovsky/claude-passthru/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nnemirovsky/claude-passthru)](https://github.com/nnemirovsky/claude-passthru/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Motivating examples
+The native permission system in Claude Code only takes glob wildcards at the end of a pattern, which leaves big gaps. `passthru` adds a thin regex layer in front of it so you can auto-allow (or deny) tool calls by shape instead of listing each command. It sits on top of your existing `settings.json` and leaves everything that does not match to the native dialog.
 
-Two gaps the native permission system cannot close on its own.
+## Quick example
 
-**1. Directory-prefix Bash rules.** A native rule like `Bash(bash /Users/you/project/:*)` cannot match `bash /Users/you/project/script.sh` because Claude Code enforces a word boundary after the prefix (see `src/tools/BashTool/bashPermissions.ts:894-911`). Glob wildcards only apply at the end, so you either have to list every script by name or grant the whole `Bash(bash:*)` namespace. A passthru rule does what you wanted in the first place:
+Native `Bash(bash /Users/you/project/:*)` does not match `bash /Users/you/project/script.sh` because Claude Code enforces a word boundary after the prefix. You end up listing every script by name, or giving up and granting the full `Bash(bash:*)` namespace.
+
+With passthru, one rule does what you meant in the first place:
 
 ```json
 { "tool": "Bash", "match": { "command": "^bash /Users/you/project/" }, "reason": "run project scripts" }
 ```
 
-**2. Shape-aware command rules.** Native `Bash(gh api:*)` either allows every `gh api` call or none. A passthru rule pins the shape of the endpoint you want to auto-allow:
-
-```json
-{ "tool": "Bash", "match": { "command": "^gh api /repos/[^/]+/[^/]+/forks" }, "reason": "github forks api reads" }
-```
-
-This matches `gh api /repos/anthropics/claude-code/forks` for any owner/repo pair but does NOT match `gh api /repos/foo/bar/issues`, `curl ...`, or `git push`.
-
-See [`docs/examples.md`](docs/examples.md) for more real-world rules covering `Bash`, `PowerShell`, `Read`, `WebFetch`, and MCP tool namespaces.
-
-## Why
-
-Native rules solve the common case. They fall short when:
-
-* The thing you want to match is not space-delimited after a prefix (directory paths, URL paths).
-* You need to pin the shape of a sub-argument, not just the leading verb.
-* You want to allow a whole MCP server family without listing every tool.
-* You want a deny list that unconditionally overrides a more permissive allow.
-
-`passthru` adds a thin regex layer in front of the native system. When a passthru rule matches, the hook emits a decision and Claude Code skips the permission dialog. When nothing matches, control passes through to the native rules unchanged. Nothing about your existing `settings.json` or `.claude/settings.local.json` changes.
+More examples: shape-matching a `gh api` endpoint across any owner/repo pair, allowing every tool on an MCP server, denying `rm -rf /` globally. See [Rule format reference](#rule-format-reference) and [`docs/examples.md`](docs/examples.md).
 
 ## Install
 
@@ -42,13 +27,30 @@ Native rules solve the common case. They fall short when:
 /plugin install passthru
 ```
 
-You can also load the plugin straight from a working tree for local testing:
+## What you can do
 
-```
-claude --plugin-dir /path/to/claude-passthru
-```
+* **Regex-based Bash prefixes.** Auto-allow a directory of scripts, a shell pipeline, or any command family the native glob syntax cannot express.
+* **Shape-aware path and URL rules.** Match on the structure of a path or URL (e.g. `^gh api /repos/[^/]+/[^/]+/forks`) so you pin the endpoint, not the owner.
+* **MCP tool namespaces.** Allow a whole MCP server family with a single tool-regex rule, no need to enumerate every tool.
+* **Deny lists that win.** A matching deny rule unconditionally overrides any allow, so you can cement safety rules on top of a permissive allow set.
+* **Opt-in audit log.** JSONL record of every decision (including what the native dialog did for passthroughs). Off by default, zero overhead when disabled.
+* **Standalone verifier.** Validate every rule file from the command line or via `/passthru:verify` to catch bad JSON, invalid regex, and allow/deny conflicts before they silently disable rules.
+* **First-run bootstrap.** One-shot importer that converts existing native `permissions.allow` entries into passthru rules.
 
-That form is handy during development because no `/plugin install` step is needed. See the [Test locally](#test-locally) section below.
+## Commands
+
+All commands are plugin-namespaced under `/passthru:`.
+
+| Command | What it does |
+| --- | --- |
+| `/passthru:add` | Add a rule without hand-editing `passthru.json`. Supports `--deny` and `--field`. |
+| `/passthru:suggest` | Propose a generalized rule from a recent tool call in the conversation, then write it on confirmation. |
+| `/passthru:verify` | Validate every rule file. Surfaces parse errors, schema violations, invalid regex, duplicates, and allow/deny conflicts. |
+| `/passthru:log` | Read the audit log with filters. Also toggles the audit sentinel on/off. |
+
+Full reference in the [Command reference](#command-reference) section below.
+
+---
 
 ## Requirements
 
@@ -66,6 +68,19 @@ Runtime dependencies the plugin needs on the user's machine.
   * npm (any platform): `npm install -g bats`
 
 **PowerShell support:** the hook itself is Bash plus perl only. PowerShell rule matching works because Claude Code still invokes the `PreToolUse` hook for `PowerShell` tool calls. No PowerShell runtime is needed on the user's machine for the plugin itself.
+
+## How it works
+
+Native rules solve the common case. They fall short when:
+
+* The thing you want to match is not space-delimited after a prefix (directory paths, URL paths).
+* You need to pin the shape of a sub-argument, not just the leading verb.
+* You want to allow a whole MCP server family without listing every tool.
+* You want a deny list that unconditionally overrides a more permissive allow.
+
+`passthru` adds a thin regex layer in front of the native system. When a passthru rule matches, the hook emits a decision and Claude Code skips the permission dialog. When nothing matches, control passes through to the native rules unchanged. Nothing about your existing `settings.json` or `.claude/settings.local.json` changes.
+
+Works across every tool Claude Code exposes (`Bash`, `PowerShell`, `Read`, `Edit`, `Write`, `WebFetch`, MCP tools, and so on).
 
 ## First-run bootstrap
 
@@ -188,7 +203,7 @@ Exit codes:
 
 ## Verifying rules
 
-Run `/passthru:verify` (or `bash scripts/verify.sh`) whenever you edit a `passthru.json` file by hand. The hook silently skips malformed rule files at runtime so a typo can quietly disable your rules; the verifier surfaces the failure up front.
+Run `/passthru:verify` (or `bash scripts/verify.sh`) whenever you edit a `passthru.json` file by hand. The hook silently skips malformed rule files at runtime so a typo can quietly disable your rules. The verifier surfaces the failure up front.
 
 Automatic verification already covers every machine-driven write path. The following all call `scripts/write-rule.sh`, which takes a backup, writes the rule, runs the verifier, and restores the backup if verification fails:
 
@@ -252,7 +267,7 @@ or
 
 * `allow` - a passthru allow rule matched.
 * `deny` - a passthru deny rule matched.
-* `passthrough` - no passthru rule matched; control passed to the native permission system.
+* `passthrough` - no passthru rule matched. Control passed to the native permission system.
 
 From the `PostToolUse` hook, classifying what the native dialog decided for a passthrough:
 
@@ -279,6 +294,10 @@ bash scripts/log.sh --format raw | jq .
 * **Rules are not firing.** Launch Claude Code with `claude --debug` and watch the hook output. The handler prints its decision reason to stderr, which `--debug` surfaces.
 * **Concurrent writes or a stuck lock.** `scripts/write-rule.sh` serializes writers under a single user-scope lock at the directory `~/.claude/passthru.write.lock.d`. The lock uses `mkdir`, which is atomic on every POSIX filesystem, so no `flock(1)` is required. If the process that held the lock died without releasing it, remove the directory manually (`rmdir ~/.claude/passthru.write.lock.d`). Lock-acquisition timeout defaults to 5 seconds and can be overridden via `PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment.
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev loop, test commands, and rule schema evolution policy.
+
 ## License
 
-MIT
+[MIT](LICENSE)
