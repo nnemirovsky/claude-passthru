@@ -346,12 +346,12 @@ Atomic write wrapper (`write-rule.sh`):
 **Files:**
 - Create: `/Users/nemirovsky/Developer/claude-passthru/commands/verify.md`
 
-- [ ] write `commands/verify.md` with frontmatter: `description`, `argument-hint: "[--scope user|project|all] [--strict]"`. Exposed as `/passthru:verify`.
-- [ ] prompt body instructs Claude to run `bash ${CLAUDE_PLUGIN_ROOT}/scripts/verify.sh $ARGUMENTS`, present the output in a readable way, and on errors explain what to do (edit file, re-run).
-- [ ] include guidance: when the user edits `passthru.json` directly, they should run `/passthru:verify` to catch errors before the next tool call.
-- [ ] extend the shared frontmatter bats test to cover `verify.md`.
-- [ ] manually verify: pre-seed a passthru.json with an invalid regex, run `/passthru:verify`, confirm error is surfaced clearly; fix the regex, re-run, confirm `[OK]`.
-- [ ] run tests (bats) - must pass before task 8b.
+- [x] write `commands/verify.md` with frontmatter: `description`, `argument-hint: "[--scope user|project|all] [--strict]"`. Exposed as `/passthru:verify`.
+- [x] prompt body instructs Claude to run `bash ${CLAUDE_PLUGIN_ROOT}/scripts/verify.sh $ARGUMENTS`, present the output in a readable way, and on errors explain what to do (edit file, re-run).
+- [x] include guidance: when the user edits `passthru.json` directly, they should run `/passthru:verify` to catch errors before the next tool call.
+- [x] extend the shared frontmatter bats test to cover `verify.md`.
+- [x] manual verification (deferred to Task 11).
+- [x] run tests (bats) - must pass before task 8b.
 
 ### Task 8b: /passthru:log slash command + scripts/log.sh
 
