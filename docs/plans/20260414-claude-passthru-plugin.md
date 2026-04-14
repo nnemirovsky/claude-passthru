@@ -30,7 +30,7 @@ Related patterns found:
 - Existing community hooks (kornysietsma/claude-code-permissions-hook, hirano00o/gatehook) solve half the problem but lack scope merging and plugin packaging.
 
 Dependencies identified:
-- `bash` 4.0+, `jq`, `grep -P` (PCRE). `bats-core` for tests. All available on macOS/Linux.
+- `bash` 4.0+, `jq`, PCRE regex engine (via `grep -P` on GNU systems or `perl` fallback on BSD/macOS where grep lacks `-P`). `bats-core` for tests. All available on macOS/Linux by default (perl is preinstalled).
 
 ## Development Approach
 
@@ -219,13 +219,15 @@ File locations:
 - Modify: `/Users/nemirovsky/Developer/claude-passthru/hooks/common.sh`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/common_match.bats`
 
-- [ ] implement `match_rule <tool_name> <tool_input_json> <rule_json>` returning 0 on match, 1 on no match.
-- [ ] check `tool` regex against `tool_name` using `grep -P`. Absent/empty = match any.
-- [ ] for each key in `match`: extract the corresponding field from `tool_input` via `jq -r`; if field is null or missing, rule fails; else regex-match with `grep -P`.
-- [ ] empty or absent `match` = match any input.
-- [ ] implement `find_first_match <rules_array_json> <tool_name> <tool_input>` returning the first matching rule JSON, or empty on no match. Caller extracts `.allow` or `.deny` with jq before passing in - no in-function jq path indirection.
-- [ ] write bats tests covering: Bash command regex, Read file_path regex, WebFetch url regex, MCP tool name regex, multi-field match (AND), absent match field, field missing from tool_input (no match), invalid regex (error).
-- [ ] run tests - must pass before task 4.
+- [x] implement `match_rule <tool_name> <tool_input_json> <rule_json>` returning 0 on match, 1 on no match.
+- [x] check `tool` regex against `tool_name` using `grep -P` (or perl fallback on BSD/macOS where grep lacks `-P`). Absent/empty = match any.
+- [x] for each key in `match`: extract the corresponding field from `tool_input` via `jq -r`; if field is null or missing, rule fails; else regex-match with `grep -P` (or perl fallback).
+- [x] empty or absent `match` = match any input.
+- [x] implement `find_first_match <rules_array_json> <tool_name> <tool_input>` returning the first matching rule JSON, or empty on no match. Caller extracts `.allow` or `.deny` with jq before passing in - no in-function jq path indirection.
+- [x] write bats tests covering: Bash command regex, Read file_path regex, WebFetch url regex, MCP tool name regex, multi-field match (AND), absent match field, field missing from tool_input (no match), invalid regex (error).
+- [x] run tests - must pass before task 4.
+
+Implementation note: macOS ships BSD grep without `-P`. Implementation uses `perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/'` as the PCRE backend (perl is preinstalled on macOS and Linux). Exit codes: 0=match, 1=no-match, 2=bad-regex. Bad-regex errors from `find_first_match` print the offending rule index to stderr. README (Task 10) should note the perl runtime dependency.
 
 ### Task 4: Hook handler (pre-tool-use.sh)
 

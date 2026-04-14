@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # claude-passthru common library, sourced by hook handlers and scripts.
-# Provides rule file loading, merging, and basic schema validation.
+# Provides rule file loading, merging, schema validation, and PCRE-based rule matching.
 #
 # Functions:
 #   load_rules                 - read + merge up to four rule files, emit JSON on stdout.
 #   validate_rules <json>      - schema-validate merged JSON, exit nonzero with message on violation.
+#   pcre_match <subject> <pat> - PCRE match via perl. 0=match, 1=no-match, 2=bad-regex.
+#   match_rule <tool_name> <tool_input_json> <rule_json> - 0=match, 1=no-match, 2=bad-regex.
+#   find_first_match <rules_array_json> <tool_name> <tool_input_json> - first matching rule on stdout.
 #
 # All output is plain ASCII. Errors go to stderr. Functions return non-zero on failure
 # without calling `exit` so callers can decide how to recover (hook handler fails open,
 # verifier fails closed).
+#
+# Platform note: macOS ships BSD grep which lacks -P (PCRE). We use perl (default on macOS)
+# for regex matching instead. Perl's regex engine is PCRE-compatible for the subset we use
+# (anchors, character classes, alternation, quantifiers, non-capturing groups).
 
 # Intentionally NOT setting `set -e` here. Callers decide error handling.
 # This file is sourced, not executed.
@@ -211,6 +218,178 @@ validate_rules() {
     done <<<"$report"
     return 2
   fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# pcre_match
+# ---------------------------------------------------------------------------
+#
+# Usage: pcre_match <subject> <pattern>
+# Returns:
+#   0 if the subject matches the pattern
+#   1 if the subject does not match
+#   2 if the pattern fails to compile (invalid regex)
+#
+# Perl's regex engine is used here because macOS ships BSD grep which does not
+# support -P. Perl is preinstalled on macOS and Linux distributions this plugin
+# targets. Perl's regex flavor is PCRE-compatible for the patterns users write.
+#
+# The subject and pattern are passed as argv to perl to avoid shell-quoting
+# hazards. Compile errors produce perl's die output on stderr (exit 255), which
+# we translate to return 2. Match/no-match is exit 0/1 from perl's `exit(1)
+# unless` idiom.
+pcre_match() {
+  local subject="$1"
+  local pattern="$2"
+  local rc=0
+  perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$subject" "$pattern" 2>/dev/null
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  elif [ "$rc" -eq 1 ]; then
+    return 1
+  else
+    # Non-0/1 exit (typically 255 from perl's die on bad regex).
+    return 2
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# match_rule
+# ---------------------------------------------------------------------------
+#
+# Usage: match_rule <tool_name> <tool_input_json> <rule_json>
+# Returns:
+#   0 if the tool_name + tool_input satisfy the rule
+#   1 if they do not
+#   2 if a regex in the rule fails to compile (caller should identify which rule)
+#
+# Semantics (per plan):
+#   * `tool` regex is matched against tool_name. Absent or empty tool = match any tool.
+#   * For each key in `match`: extract tool_input[key] via jq -r; if the field is null
+#     or missing, the rule fails. Else regex-match its value. All match keys must pass
+#     (AND semantics).
+#   * Absent or empty `match` = match any input.
+match_rule() {
+  local tool_name="$1"
+  local tool_input="$2"
+  local rule="$3"
+
+  # 1. Check .tool regex (if present and non-empty) against tool_name.
+  local tool_pat
+  tool_pat="$(jq -r '.tool // ""' <<<"$rule" 2>/dev/null)"
+  if [ -n "$tool_pat" ]; then
+    pcre_match "$tool_name" "$tool_pat"
+    local rc=$?
+    if [ "$rc" -eq 2 ]; then
+      return 2
+    fi
+    if [ "$rc" -ne 0 ]; then
+      return 1
+    fi
+  fi
+
+  # 2. Check .match object (if present and non-empty) against tool_input fields.
+  # We iterate keys via jq; for each key, we extract the field from tool_input
+  # and PCRE-match it. Missing/null fields fail the rule.
+  local match_type
+  match_type="$(jq -r '.match // empty | type' <<<"$rule" 2>/dev/null)"
+  if [ "$match_type" != "object" ]; then
+    # No .match (or .match not an object) - passes (match any input).
+    return 0
+  fi
+
+  local match_keys_count
+  match_keys_count="$(jq -r '.match | length' <<<"$rule" 2>/dev/null)"
+  if [ "$match_keys_count" = "0" ]; then
+    # Empty match object - match any input.
+    return 0
+  fi
+
+  # Stream key=pattern pairs as NUL-delimited records for safe iteration.
+  # Format per record: key\npattern (keys contain no newline per JSON spec; patterns can).
+  # We use a marker line to separate records since patterns may contain \n (regex anchors etc.
+  # usually don't but literal newline in regex is possible, e.g. multiline patterns).
+  # jq's @tsv would mangle tabs; instead we use a record separator approach.
+  local keys_json
+  keys_json="$(jq -c '.match | to_entries' <<<"$rule" 2>/dev/null)"
+  if [ -z "$keys_json" ] || [ "$keys_json" = "null" ]; then
+    return 0
+  fi
+
+  local count i key pat field field_null
+  count="$match_keys_count"
+  for ((i = 0; i < count; i++)); do
+    key="$(jq -r ".[${i}].key" <<<"$keys_json" 2>/dev/null)"
+    pat="$(jq -r ".[${i}].value" <<<"$keys_json" 2>/dev/null)"
+    if [ -z "$key" ]; then
+      # Shouldn't happen for valid rules, but be defensive.
+      return 1
+    fi
+    # Extract the field from tool_input. Detect null/missing distinctly from empty string.
+    field_null="$(jq -r "if has(\"${key}\") and (.\"${key}\" != null) then \"0\" else \"1\" end" <<<"$tool_input" 2>/dev/null)"
+    if [ "$field_null" != "0" ]; then
+      # Field missing or null -> rule does not match.
+      return 1
+    fi
+    field="$(jq -r ".\"${key}\" // \"\"" <<<"$tool_input" 2>/dev/null)"
+    pcre_match "$field" "$pat"
+    local rc=$?
+    if [ "$rc" -eq 2 ]; then
+      return 2
+    fi
+    if [ "$rc" -ne 0 ]; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# find_first_match
+# ---------------------------------------------------------------------------
+#
+# Usage: find_first_match <rules_array_json> <tool_name> <tool_input_json>
+# Output: the first matching rule JSON (compact) on stdout; empty output if no match.
+# Return:
+#   0 always on clean traversal (even if no match - check stdout for emptiness)
+#   2 if a regex in any visited rule fails to compile; stderr carries the index + pattern
+#
+# The caller is responsible for selecting which list to pass in (e.g. .deny first,
+# then .allow). No in-function jq path indirection, per plan.
+find_first_match() {
+  local rules="$1"
+  local tool_name="$2"
+  local tool_input="$3"
+
+  # Defensive: empty / null rules array means no match.
+  if [ -z "$rules" ] || [ "$rules" = "null" ]; then
+    return 0
+  fi
+
+  local n
+  n="$(jq -r 'if type == "array" then length else 0 end' <<<"$rules" 2>/dev/null)"
+  if [ -z "$n" ] || [ "$n" = "0" ]; then
+    return 0
+  fi
+
+  local i rule rc
+  for ((i = 0; i < n; i++)); do
+    rule="$(jq -c ".[${i}]" <<<"$rules" 2>/dev/null)"
+    match_rule "$tool_name" "$tool_input" "$rule"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s\n' "$rule"
+      return 0
+    elif [ "$rc" -eq 2 ]; then
+      printf '[ERR] regex compile failure at rule index %s: %s\n' "$i" "$rule" >&2
+      return 2
+    fi
+    # rc == 1: no match, keep looking.
+  done
 
   return 0
 }
