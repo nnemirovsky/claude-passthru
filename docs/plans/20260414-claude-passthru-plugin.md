@@ -409,14 +409,14 @@ Atomic write wrapper (`write-rule.sh`):
 - Create: `/Users/nemirovsky/Developer/claude-passthru/docs/rule-format.md`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/docs/examples.md`
 
-- [ ] expand `README.md` to cover: what it does, why (motivating examples like the directory-prefix gap, the `gh api` regex use case), install, first-run bootstrap, rule format reference with examples, command reference (`/passthru:add`, `/passthru:suggest`, `/passthru:verify`, `/passthru:log`), the verifier (`scripts/verify.sh` standalone invocation), troubleshooting, sentinel-file escape hatch (`touch ~/.claude/passthru.disabled`).
-- [ ] + README must include a **"Requirements"** section listing runtime dependencies with install hints:
+- [x] expand `README.md` to cover: what it does, why (motivating examples like the directory-prefix gap, the `gh api` regex use case), install, first-run bootstrap, rule format reference with examples, command reference (`/passthru:add`, `/passthru:suggest`, `/passthru:verify`, `/passthru:log`), the verifier (`scripts/verify.sh` standalone invocation), troubleshooting, sentinel-file escape hatch (`touch ~/.claude/passthru.disabled`).
+- [x] + README must include a **"Requirements"** section listing runtime dependencies with install hints:
   - `bash` (check actual minimum - 3.2 if code is 3.2-compatible, else 4.0+). macOS default is 3.2; Linux usually ships 4+. Verify the minimum against the scripts actually committed before pinning.
   - `jq` 1.6+ - macOS: `brew install jq`, Debian/Ubuntu: `apt install jq`, RHEL/Fedora: `dnf install jq`.
   - `perl` 5+ - preinstalled on macOS and most Linux distros; used as the PCRE backend because BSD grep on macOS lacks `-P`.
   - `bats-core` 1.9+ - tests only; not required to run the plugin. macOS: `brew install bats-core`, Debian/Ubuntu: `apt install bats` (may be older; npm install preferred: `npm install -g bats`).
   - Note PowerShell support: hook itself is Bash/perl only; PowerShell rule matching works because Claude Code still invokes the PreToolUse hook for `PowerShell` tool calls - no PowerShell runtime needed on the user's machine.
-- [ ] + README must include an **"Audit log"** section documenting:
+- [x] + README must include an **"Audit log"** section documenting:
   - Audit is **opt-in and off by default**.
   - Enable: `touch ~/.claude/passthru.audit.enabled` or `/passthru:log --enable`.
   - Disable: `rm ~/.claude/passthru.audit.enabled` or `/passthru:log --disable`.
@@ -424,16 +424,16 @@ Atomic write wrapper (`write-rule.sh`):
   - Event types: `allow`, `deny`, `passthrough` (from PreToolUse) and `asked_allowed_once`, `asked_allowed_always`, `asked_denied_once`, `asked_denied_always`, `asked_allowed_unknown` (from PostToolUse, passthrough outcomes only).
   - View: `/passthru:log` or `scripts/log.sh` directly; flags documented in the command help.
   - Log rotation: none built in; use `logrotate` or manual truncation if the file grows. Document expected volume (one line per tool call when enabled).
-- [ ] README must include a **"Test locally"** section with the exact command for loading an uninstalled plugin directory:
+- [x] README must include a **"Test locally"** section with the exact command for loading an uninstalled plugin directory:
 
   ```
   claude --plugin-dir /path/to/claude-passthru
   ```
 
   Explain that this loads the plugin from the working tree without needing `/plugin install`, which is the fastest iteration loop during development. Link to this section from CONTRIBUTING.md.
-- [ ] README must include a **"Verifying rules"** section: when to run `/passthru:verify` (after manual edits to `passthru.json`), what the automatic verification path covers (after `/passthru:add`, `/passthru:suggest`, `bootstrap --write`), and how to interpret the output.
-- [ ] `CONTRIBUTING.md`: contributor-facing notes covering (a) local dev loop with `claude --plugin-dir`, (b) how to run bats tests, (c) how to pipe-test the hook manually, (d) rule schema evolution guidelines (bump `version` field on breaking changes), (e) how to add a new verifier check, (f) branch policy: `main` is protected on GitHub, all changes go through PRs.
-- [ ] `CLAUDE.md`: developer-facing notes for future Claude sessions. Must include a **Releases** section modeled on `/Users/nemirovsky/Developer/sluice/CLAUDE.md`:
+- [x] README must include a **"Verifying rules"** section: when to run `/passthru:verify` (after manual edits to `passthru.json`), what the automatic verification path covers (after `/passthru:add`, `/passthru:suggest`, `bootstrap --write`), and how to interpret the output.
+- [x] `CONTRIBUTING.md`: contributor-facing notes covering (a) local dev loop with `claude --plugin-dir`, (b) how to run bats tests, (c) how to pipe-test the hook manually, (d) rule schema evolution guidelines (bump `version` field on breaking changes), (e) how to add a new verifier check, (f) branch policy: `main` is protected on GitHub, all changes go through PRs.
+- [x] `CLAUDE.md`: developer-facing notes for future Claude sessions. Must include a **Releases** section modeled on `/Users/nemirovsky/Developer/sluice/CLAUDE.md`:
 
   - Use the `release-tools:new` skill (`/release-tools:new`) to cut a new release.
   - **Naming:** tag `vX.Y.Z`, release title same as tag.
@@ -444,11 +444,11 @@ Atomic write wrapper (`write-rule.sh`):
   - **Skip releases for:** `chore`, `docs`, `ci`, `test` only PRs.
   - **Version bump is two-file**: before tagging, update BOTH `.claude-plugin/plugin.json` `version` and `.claude-plugin/marketplace.json` version metadata to match the target tag (without the `v` prefix - `plugin.json` uses `0.2.0` not `v0.2.0`). Commit the version bump as `chore(release): vX.Y.Z`, then tag. The `release-tools:new` skill should be extended or guided to handle this; if it does not, document the manual two-file bump step explicitly in CLAUDE.md.
   - **File structure**, **how tests run**, **how to pipe-test the hook**, **verifier CLI flags** - all documented inline.
-- [ ] `docs/rule-format.md`: detailed schema reference.
-- [ ] `docs/examples.md`: 10+ real-world rule examples across Bash, PowerShell, Read, WebFetch, MCP.
-- [ ] verify all anchors/paths in docs resolve.
-- [ ] (no new code tests for docs; existing tests still green).
-- [ ] run full test suite - must pass before task 11.
+- [x] `docs/rule-format.md`: detailed schema reference.
+- [x] `docs/examples.md`: 10+ real-world rule examples across Bash, PowerShell, Read, WebFetch, MCP.
+- [x] verify all anchors/paths in docs resolve.
+- [x] (no new code tests for docs; existing tests still green).
+- [x] run full test suite - must pass before task 11.
 
 ### Task 11: Verify acceptance criteria
 
