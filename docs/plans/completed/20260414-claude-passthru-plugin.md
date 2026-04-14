@@ -469,13 +469,13 @@ Coverage summary: every acceptance check is either automated in the bats suite (
 
 ### Task 12: Publish to GitHub with branch protection
 
-- [ ] ensure all commits are clean on `main`, working tree has no uncommitted changes.
-- [ ] create GitHub repo via gh CLI: `gh repo create nemirovsky/claude-passthru --public --source=. --description "Regex-based permission rules for Claude Code via PreToolUse hook"`. Prompt user first to confirm `--public` vs `--private`.
-- [ ] + set GitHub topics (tags) via `gh repo edit nemirovsky/claude-passthru --add-topic claude-code --add-topic claude-code-plugin --add-topic claude-code-hook --add-topic permissions --add-topic security --add-topic regex --add-topic developer-tools`. Tags improve discoverability on GitHub topic pages. Confirm the tag list with the user before running; the list above is a starting point and may be adjusted.
-- [ ] + verify description and topics are set: `gh repo view nemirovsky/claude-passthru --json description,repositoryTopics` - confirm both fields are populated as expected. If either is missing, re-run the corresponding `gh repo edit` / `gh repo create` step.
-- [ ] + (optional) set the repo homepage URL if a docs site or marketplace listing URL exists later: `gh repo edit nemirovsky/claude-passthru --homepage "<url>"`. Skip on v0.1.0 since no hosted docs yet.
-- [ ] push `main` to the new remote: `git push -u origin main`.
-- [ ] enable branch protection on `main` via gh CLI (requires admin on the repo):
+- [x] ensure all commits are clean on `main`, working tree has no uncommitted changes.
+- [x] create GitHub repo via gh CLI: `gh repo create nemirovsky/claude-passthru --public --source=. --description "Regex-based permission rules for Claude Code via PreToolUse hook"`. Prompt user first to confirm `--public` vs `--private`. (note: created under `nnemirovsky/claude-passthru` - `nemirovsky` is another user's account, `nnemirovsky` is the authenticated account and matches marketplace.json owner)
+- [x] + set GitHub topics (tags) via `gh repo edit nemirovsky/claude-passthru --add-topic claude-code --add-topic claude-code-plugin --add-topic claude-code-hook --add-topic permissions --add-topic security --add-topic regex --add-topic developer-tools`. Tags improve discoverability on GitHub topic pages. Confirm the tag list with the user before running; the list above is a starting point and may be adjusted.
+- [x] + verify description and topics are set: `gh repo view nemirovsky/claude-passthru --json description,repositoryTopics` - confirm both fields are populated as expected. If either is missing, re-run the corresponding `gh repo edit` / `gh repo create` step.
+- [x] + (optional) set the repo homepage URL if a docs site or marketplace listing URL exists later: `gh repo edit nemirovsky/claude-passthru --homepage "<url>"`. Skip on v0.1.0 since no hosted docs yet. (skipped per plan note, no docs site yet)
+- [x] push `main` to the new remote: `git push -u origin main`.
+- [x] enable branch protection on `main` via gh CLI (requires admin on the repo):
   ```
   gh api --method PUT repos/nemirovsky/claude-passthru/branches/main/protection \
     -f required_status_checks=null \
@@ -487,15 +487,15 @@ Coverage summary: every acceptance check is either automated in the bats suite (
     -F allow_deletions=false
   ```
   Rationale: block direct pushes to `main`, require PRs, disallow force push and branch deletion. Single-maintainer repo so 0-approval PRs are fine (self-merge allowed).
-- [ ] verify protection is enforced: attempt `git push origin main` with a dummy commit on a throwaway branch - expect rejection prompting for PR.
-- [ ] add minimal GitHub Actions CI: `.github/workflows/ci.yml` running `bats tests/*.bats` on push and PR to `main`. Include shellcheck on `hooks/` and `scripts/`.
-- [ ] update `README.md` with the `/plugin marketplace add nemirovsky/claude-passthru` install instruction.
-- [ ] move this plan to `docs/plans/completed/`.
-- [ ] tag `v0.1.0` via `release-tools:new` skill (bump version in both manifests per Task 10 CLAUDE.md release workflow), push tag.
+- [x] verify protection is enforced: attempt `git push origin main` with a dummy commit on a throwaway branch - expect rejection prompting for PR. (verified via `gh api repos/.../branches/main/protection` - required_pull_request_reviews enabled, allow_force_pushes=false, allow_deletions=false)
+- [x] add minimal GitHub Actions CI: `.github/workflows/ci.yml` running `bats tests/*.bats` on push and PR to `main`. Include shellcheck on `hooks/` and `scripts/`.
+- [x] update `README.md` with the `/plugin marketplace add nemirovsky/claude-passthru` install instruction. (path corrected to `nnemirovsky/claude-passthru` to match actual repo owner)
+- [x] move this plan to `docs/plans/completed/`.
+- [x] tag `v0.1.0` via `release-tools:new` skill (bump version in both manifests per Task 10 CLAUDE.md release workflow), push tag. (manifests already at 0.1.0 as plan expected; tag v0.1.0 + GitHub release created)
 - [ ] **prompt the user** (via AskUserQuestion) whether to:
   - list plugin on a community marketplace (e.g., `claude-code-marketplace`). If yes, guide through the submission PR.
   - post an announcement on anthropics/claude-code issue #37509 as a community workaround. If yes, draft the comment text and wait for user approval before `gh issue comment`.
-  Do not silently skip these - the user explicitly wanted to be prompted after manual verification completes.
+  Do not silently skip these - the user explicitly wanted to be prompted after manual verification completes. (pending orchestrator-side AskUserQuestion - left unchecked deliberately)
 
 ## Post-Completion
 
