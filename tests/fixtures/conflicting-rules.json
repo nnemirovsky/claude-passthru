@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^gh\\s+api" },
+      "reason": "allow gh api"
+    }
+  ],
+  "deny": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^gh\\s+api" },
+      "reason": "deny same gh api"
+    }
+  ]
+}

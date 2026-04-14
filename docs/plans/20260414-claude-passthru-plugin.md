@@ -289,25 +289,25 @@ Implementation note: macOS ships BSD grep without `-P`. Implementation uses `per
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/fixtures/shadowed-rule.json`
 
 Verifier (`verify.sh`):
-- [ ] loads all four rule files (user + project, authored + imported), runs checks across the merged set, prints a structured report, exits 0 on clean / 1 on any error / 2 on warnings only (only if `--strict`).
-- [ ] **check 1 parse:** every existing file parses as JSON (fail with file path + jq error on parse fail).
-- [ ] **check 2 schema:** each rule has `tool` or `match`, types match spec, `version: 1`.
-- [ ] **check 3 regex compile:** every `tool` regex and every `match.*` regex is tested with `grep -P '' </dev/null` (compile-only, no matching). On syntax error, report file path + rule index + offending pattern + grep's error.
-- [ ] **check 4 duplicates:** exact-duplicate rules (same tool + same match object) across all scopes -> warn (not always wrong, but surfaced so the user can prune).
-- [ ] **check 5 deny/allow conflict:** identical tool + match present in both `.deny[]` and `.allow[]` across any scope -> error (user intent unclear; deny wins silently would be worse than explicit failure).
-- [ ] **check 6 shadowing:** within a single allow[] or deny[] array (post-merge), if rule at index i has the exact same tool+match as rule at some index j<i, warn "rule N shadowed by earlier identical rule at index M". Formal regex-subset detection is undecidable; this heuristic catches the common case.
-- [ ] **flags:** `--strict` (warnings also non-zero exit), `--quiet` (no stdout on success, still prints errors), `--scope user|project|all` (default all), `--format plain|json` (default plain).
-- [ ] **report format:** `[OK] N rules across M files checked` on success; on failure, structured lines `<severity> <file>:<jq-path> [rule-index] <message>`. Output is plain ASCII per project writing rules.
-- [ ] write bats tests for each check with dedicated fixtures; test strict mode; test json output is valid JSON; test exit codes; test `--scope user` runs against only user files.
-- [ ] edge cases: no files at all -> exit 0 with "no rules"; one file invalid + one valid -> exit 1, specific file called out; identical rules in user + project -> warn (still exit 0 without --strict).
+- [x] loads all four rule files (user + project, authored + imported), runs checks across the merged set, prints a structured report, exits 0 on clean / 1 on any error / 2 on warnings only (only if `--strict`).
+- [x] **check 1 parse:** every existing file parses as JSON (fail with file path + jq error on parse fail).
+- [x] **check 2 schema:** each rule has `tool` or `match`, types match spec, `version: 1`.
+- [x] **check 3 regex compile:** every `tool` regex and every `match.*` regex is tested with `grep -P '' </dev/null` (compile-only, no matching). On syntax error, report file path + rule index + offending pattern + grep's error.
+- [x] **check 4 duplicates:** exact-duplicate rules (same tool + same match object) across all scopes -> warn (not always wrong, but surfaced so the user can prune).
+- [x] **check 5 deny/allow conflict:** identical tool + match present in both `.deny[]` and `.allow[]` across any scope -> error (user intent unclear; deny wins silently would be worse than explicit failure).
+- [x] **check 6 shadowing:** within a single allow[] or deny[] array (post-merge), if rule at index i has the exact same tool+match as rule at some index j<i, warn "rule N shadowed by earlier identical rule at index M". Formal regex-subset detection is undecidable; this heuristic catches the common case.
+- [x] **flags:** `--strict` (warnings also non-zero exit), `--quiet` (no stdout on success, still prints errors), `--scope user|project|all` (default all), `--format plain|json` (default plain).
+- [x] **report format:** `[OK] N rules across M files checked` on success; on failure, structured lines `<severity> <file>:<jq-path> [rule-index] <message>`. Output is plain ASCII per project writing rules.
+- [x] write bats tests for each check with dedicated fixtures; test strict mode; test json output is valid JSON; test exit codes; test `--scope user` runs against only user files.
+- [x] edge cases: no files at all -> exit 0 with "no rules"; one file invalid + one valid -> exit 1, specific file called out; identical rules in user + project -> warn (still exit 0 without --strict).
 
 Atomic write wrapper (`write-rule.sh`):
-- [ ] signature: `write-rule.sh <scope> <list> <rule_json>` where `scope` is `user|project` and `list` is `allow|deny`.
-- [ ] resolve target `passthru.json` path, create if missing with `{"version":1,"allow":[],"deny":[]}`.
-- [ ] take a backup to a temp file, append the rule to the chosen list, run `scripts/verify.sh --quiet`, on verifier failure **restore backup atomically** and exit non-zero with the verifier's error on stderr, on success delete the backup and exit 0.
-- [ ] handle concurrent writes with a lock file (`~/.claude/passthru.write.lock`, 5s timeout, released via `trap`).
-- [ ] write bats tests: happy path (rule appended, file valid), invalid regex (backup restored, non-zero exit, no file corruption), missing target file (created with correct shape), concurrent write serialization.
-- [ ] run tests - must pass before task 6.
+- [x] signature: `write-rule.sh <scope> <list> <rule_json>` where `scope` is `user|project` and `list` is `allow|deny`.
+- [x] resolve target `passthru.json` path, create if missing with `{"version":1,"allow":[],"deny":[]}`.
+- [x] take a backup to a temp file, append the rule to the chosen list, run `scripts/verify.sh --quiet`, on verifier failure **restore backup atomically** and exit non-zero with the verifier's error on stderr, on success delete the backup and exit 0.
+- [x] handle concurrent writes with a lock file (`~/.claude/passthru.write.lock`, 5s timeout, released via `trap`).
+- [x] write bats tests: happy path (rule appended, file valid), invalid regex (backup restored, non-zero exit, no file corruption), missing target file (created with correct shape), concurrent write serialization.
+- [x] run tests - must pass before task 6.
 
 ### Task 6: /passthru:add slash command
 

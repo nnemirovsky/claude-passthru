@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^ls(\\s|$)" },
+      "reason": "first copy"
+    },
+    {
+      "tool": "Bash",
+      "match": { "command": "^ls(\\s|$)" },
+      "reason": "exact duplicate"
+    }
+  ],
+  "deny": []
+}

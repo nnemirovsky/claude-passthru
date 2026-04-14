@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Bash",
+      "match": { "command": "[" },
+      "reason": "bad regex - unmatched bracket"
+    }
+  ],
+  "deny": [
+    {
+      "tool": "Bash",
+      "match": { "command": "(?<" },
+      "reason": "bad regex - broken lookbehind"
+    }
+  ]
+}

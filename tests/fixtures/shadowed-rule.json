@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Read",
+      "match": { "file_path": "^/Users/[^/]+/" },
+      "reason": "first rule"
+    },
+    {
+      "tool": "Bash",
+      "match": { "command": "^echo" },
+      "reason": "unrelated rule"
+    },
+    {
+      "tool": "Read",
+      "match": { "file_path": "^/Users/[^/]+/" },
+      "reason": "shadowed by index 0"
+    }
+  ],
+  "deny": []
+}
