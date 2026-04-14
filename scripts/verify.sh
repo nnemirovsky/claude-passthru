@@ -316,8 +316,13 @@ done
 # ---------------------------------------------------------------------------
 #
 # Normalized rule identity: {tool, match} only. Reason/other fields do not count.
-# jq serializes objects with sorted keys when given `tojson` after
-# `walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)`.
+# jq serializes objects with sorted keys when given `tojson` after a recursive
+# key-sort walk.
+#
+# We compute everything in a single `jq -s` invocation that consumes a JSON
+# array of {file, list, index, canon, allow_chunk, deny_chunk} records and
+# emits the merged allow[]/deny[] arrays plus the duplicate/conflict groups.
+# This replaces ~80 lines of bash sort + flush_group + per-file merge loops.
 
 canon_rule() {
   # stdin rule JSON -> stdout canonical identity string
@@ -325,100 +330,81 @@ canon_rule() {
          | walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)'
 }
 
-# Collect (canon, file, list, index) tuples for every parsed rule.
-# TSV with tab separator, pipe through jq -R for canon_rule.
-TUPLES_FILE="$(mktemp -t passthru-verify-tuples.XXXXXX)"
-# shellcheck disable=SC2064
-trap "rm -f '$ERRORS_FILE' '$WARNS_FILE' '$TUPLES_FILE'" EXIT
-
+# Build a JSON array of file documents, each with its parsed rules and the
+# file path. Feed everything to jq once.
+PER_FILE_INPUTS="["
 for ((fi = 0; fi < ${#PARSED_FILES[@]}; fi++)); do
-  file="${PARSED_FILES[$fi]}"
-  normalized="${PARSED_JSON[$fi]}"
-
-  for list in allow deny; do
-    n="$(jq -r ".${list} | length" <<<"$normalized")"
-    for ((i = 0; i < n; i++)); do
-      rule="$(jq -c ".${list}[$i]" <<<"$normalized")"
-      canon="$(printf '%s' "$rule" | canon_rule)"
-      # TSV: list, index, canon, file
-      printf '%s\t%d\t%s\t%s\n' "$list" "$i" "$canon" "$file" >> "$TUPLES_FILE"
-    done
-  done
+  [ "$fi" -gt 0 ] && PER_FILE_INPUTS+=","
+  PER_FILE_INPUTS+="$(jq -cn \
+    --arg file "${PARSED_FILES[$fi]}" \
+    --argjson doc "${PARSED_JSON[$fi]}" \
+    '{file:$file, doc:$doc}')"
 done
+PER_FILE_INPUTS+="]"
 
-# Check 4 & 5 share a loop: for each distinct canonical rule, collect its
-# (list, file) occurrences. If >1 total -> duplicate warn. If both allow and
-# deny present -> conflict error.
-if [ -s "$TUPLES_FILE" ]; then
-  # Build a map canon -> occurrences array via awk, then post-process with jq.
-  # Simpler: group by canon via sort/awk.
-  sort -t $'\t' -k3,3 "$TUPLES_FILE" > "${TUPLES_FILE}.sorted"
+if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
+  # Single pipeline computes:
+  #   .duplicates : array of {canon, occurrences:[{file,list,index},...]}
+  #                 with len > 1 (group_by(canon))
+  #   .merged_allow / .merged_deny : concatenated lists (file order, then index)
+  GROUP_REPORT="$(jq -c '
+    def canon: {tool:(.tool // null), match:(.match // null)}
+               | walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)
+               | tojson;
+    . as $files
+    | (reduce range(0; $files | length) as $fi
+        ([];
+          . + ([range(0; ($files[$fi].doc.allow | length)) as $i
+            | { file: $files[$fi].file, list: "allow", index: $i,
+                rule: ($files[$fi].doc.allow[$i]) }])
+          + ([range(0; ($files[$fi].doc.deny | length)) as $i
+            | { file: $files[$fi].file, list: "deny", index: $i,
+                rule: ($files[$fi].doc.deny[$i]) }])
+        )
+      ) as $tuples
+    | {
+        duplicates:
+          ($tuples
+           | map(. + {canon: (.rule | canon)})
+           | group_by(.canon)
+           | map({ canon: .[0].canon,
+                   occurrences: map({file, list, index}) })
+           | map(select(.occurrences | length > 1))),
+        merged_allow:
+          ($files | map(.doc.allow) | add // []),
+        merged_deny:
+          ($files | map(.doc.deny) | add // [])
+      }
+  ' <<<"$PER_FILE_INPUTS")"
 
-  prev_canon=""
-  group_lists=()
-  group_files=()
-  flush_group() {
-    local canon="$prev_canon"
-    [ -z "$canon" ] && return 0
-    local count="${#group_lists[@]}"
-    [ "$count" -le 1 ] && return 0
-
-    # Did both allow and deny appear?
-    local has_allow=0 has_deny=0
-    for l in "${group_lists[@]}"; do
-      case "$l" in
-        allow) has_allow=1 ;;
-        deny)  has_deny=1 ;;
-      esac
-    done
-
-    # Build occurrence summary for the message.
-    local summary=""
-    for ((k = 0; k < count; k++)); do
-      if [ -z "$summary" ]; then
-        summary="${group_files[$k]}#${group_lists[$k]}"
-      else
-        summary="$summary, ${group_files[$k]}#${group_lists[$k]}"
-      fi
-    done
-
-    if [ "$has_allow" = "1" ] && [ "$has_deny" = "1" ]; then
-      diag error "${group_files[0]}" "" "" \
+  # Walk the duplicate groups: classify each as conflict (allow + deny) or
+  # plain duplicate (same list, multiple times).
+  while IFS= read -r group; do
+    [ -z "$group" ] && continue
+    has_allow="$(jq -r '.occurrences | map(select(.list == "allow")) | length > 0' <<<"$group")"
+    has_deny="$(jq -r '.occurrences | map(select(.list == "deny")) | length > 0' <<<"$group")"
+    summary="$(jq -r '.occurrences | map("\(.file)#\(.list)") | join(", ")' <<<"$group")"
+    first_file="$(jq -r '.occurrences[0].file' <<<"$group")"
+    if [ "$has_allow" = "true" ] && [ "$has_deny" = "true" ]; then
+      diag error "$first_file" "" "" \
         "conflict: same tool+match appears in both allow and deny ($summary)"
     else
-      diag warn "${group_files[0]}" "" "" \
+      diag warn "$first_file" "" "" \
         "duplicate: same rule identity appears in multiple places ($summary)"
     fi
-  }
-
-  while IFS=$'\t' read -r list idx canon file; do
-    if [ "$canon" != "$prev_canon" ]; then
-      flush_group
-      prev_canon="$canon"
-      group_lists=()
-      group_files=()
-    fi
-    group_lists+=("$list")
-    group_files+=("$file")
-  done < "${TUPLES_FILE}.sorted"
-  flush_group
-
-  rm -f "${TUPLES_FILE}.sorted"
+  done < <(jq -c '.duplicates[]' <<<"$GROUP_REPORT")
 fi
 
-# Check 6: shadowing within merged list.
-# Build the post-merge allow[] and deny[] in file order.
+# Check 6: shadowing within the merged list. Reuses the merged_allow /
+# merged_deny arrays we just built (zero extra jq forks per file).
 build_merged_list() {
   # $1 = "allow" | "deny"
   local list="$1"
-  local out="[]"
-  for ((fi = 0; fi < ${#PARSED_FILES[@]}; fi++)); do
-    local normalized="${PARSED_JSON[$fi]}"
-    local chunk
-    chunk="$(jq -c --arg k "$list" '.[$k]' <<<"$normalized")"
-    out="$(jq -c --argjson a "$out" --argjson b "$chunk" '$a + $b' <<<'null')"
-  done
-  printf '%s' "$out"
+  if [ -z "${GROUP_REPORT:-}" ]; then
+    printf '[]'
+    return 0
+  fi
+  jq -c --arg k "merged_${list}" '.[$k]' <<<"$GROUP_REPORT"
 }
 
 check_shadowing_in_list() {

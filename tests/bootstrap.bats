@@ -392,3 +392,53 @@ JSON
   # Two unique rules (ls appears twice -> deduped).
   [ "$output" = "2" ]
 }
+
+# ---------------------------------------------------------------------------
+# Edge cases: read-only target dirs, deny-only settings, non-string entries
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: --write into read-only target dir -> non-zero exit, stderr error" {
+  # Make the user .claude dir read-only after seeding the source settings.
+  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "running as root: chmod 555 does not deny writes to uid 0"
+  fi
+  chmod 555 "$USER_ROOT/.claude" 2>/dev/null || skip "cannot chmod test dir"
+  run bash -c "bash '$BOOTSTRAP' --user-only --write 2>&1"
+  # Restore so teardown can rm -rf.
+  chmod 755 "$USER_ROOT/.claude" 2>/dev/null || true
+  # We expect a failure: either mv-into-place fails or verify cannot read
+  # the new file. Either way, exit must not be 0 and the imported file must
+  # not have been written successfully.
+  [ "$status" -ne 0 ]
+  [ ! -f "$(user_imported)" ] || skip "platform allowed write through read-only dir"
+}
+
+@test "bootstrap: settings has only permissions.deny (no allow) -> empty imported" {
+  # We import only allow entries; deny entries are out of scope. A settings
+  # file with deny[] but no allow[] must still bootstrap cleanly to an empty
+  # rule set rather than skipping the file or erroring out.
+  printf '{"permissions":{"deny":["Bash(rm:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  [ -f "$(user_imported)" ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: permissions.allow with non-string entries -> non-strings dropped, strings kept" {
+  # convert_settings_file uses `map(select(type == "string"))`. Mix in a
+  # number, a boolean, an object, and a null; only the string entries
+  # should land in the output.
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":[123, true, null, {"k":"v"}, "Bash(ls:*)"]}}
+EOF
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  [ -f "$(user_imported)" ]
+  # Exactly one rule survived (Bash(ls:*)).
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "1" ]
+  run jq -r '.allow[0].match.command' "$(user_imported)"
+  [ "$output" = "^ls(\\s|\$)" ]
+}

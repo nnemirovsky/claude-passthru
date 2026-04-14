@@ -182,10 +182,12 @@ EOF
 # Concurrent write serialization
 # ---------------------------------------------------------------------------
 
-@test "write-rule: concurrent writes do not corrupt the file" {
-  # Spawn two writes in parallel to the same file with distinct rules. Either
-  # both succeed (serialized) or one succeeds and one fails cleanly; in every
-  # case, the final file must parse and contain at least one rule.
+@test "write-rule: concurrent writes serialize to exactly two rules" {
+  # Spawn two writes in parallel to the same file with distinct rules. With
+  # the mkdir-based lock both writers must serialize and BOTH must succeed
+  # (the lock timeout is 5s by default, well above the time the verifier
+  # takes). Final count must be exactly 2; "1 or 2" tolerated a real bug
+  # where one writer silently failed.
   (
     bash "$WRITE" user allow '{"tool":"Bash","match":{"command":"^a1"}}' >/dev/null 2>&1
   ) &
@@ -195,53 +197,37 @@ EOF
   ) &
   PID2=$!
 
-  wait "$PID1" || true
-  wait "$PID2" || true
+  rc1=0
+  rc2=0
+  wait "$PID1" || rc1=$?
+  wait "$PID2" || rc2=$?
+
+  # Both writers must exit 0 (serialization, not failure).
+  [ "$rc1" -eq 0 ]
+  [ "$rc2" -eq 0 ]
 
   # Final state must be valid JSON.
   [ -f "$(user_file)" ]
   run jq -e '.version == 1 and (.allow | type == "array")' "$(user_file)"
   [ "$status" -eq 0 ]
 
-  # Count must be 1 or 2 (not 0, not some corrupted value).
+  # Exact count: 2.
   run jq -r '.allow | length' "$(user_file)"
-  count="$output"
-  [ "$count" = "1" ] || [ "$count" = "2" ]
+  [ "$output" = "2" ]
 }
 
 @test "write-rule: lock timeout respected when held externally" {
   # Simulate an externally-held lock by creating the mkdir-style lock dir.
-  # We do NOT know which style the implementation chose, so we trigger both:
-  # create the mkdir lock and also attempt to hold an fd lock. For the bats
-  # environment where flock may or may not be installed, we target the path
-  # that actually exists.
+  # write-rule.sh uses mkdir locking on every platform, so this is the
+  # single, deterministic way to hold the lock from the test.
   LOCK_PATH="$USER_ROOT/.claude/passthru.write.lock"
   mkdir -p "$USER_ROOT/.claude"
-
-  if command -v flock >/dev/null 2>&1; then
-    # Hold the lock in a background subshell for longer than the timeout.
-    (
-      exec 7>"$LOCK_PATH"
-      flock 7
-      sleep 2
-    ) &
-    HOLDER=$!
-    sleep 0.2  # give the holder time to acquire
-  else
-    mkdir "${LOCK_PATH}.d"
-    HOLDER=""
-  fi
+  mkdir "${LOCK_PATH}.d"
 
   PASSTHRU_WRITE_LOCK_TIMEOUT=1 run bash "$WRITE" user allow '{"tool":"Bash","match":{"command":"^ls"}}'
   [ "$status" -ne 0 ]
 
-  # Cleanup the holder/lockdir.
-  if [ -n "$HOLDER" ]; then
-    kill "$HOLDER" 2>/dev/null || true
-    wait "$HOLDER" 2>/dev/null || true
-  else
-    rmdir "${LOCK_PATH}.d" 2>/dev/null || true
-  fi
+  rmdir "${LOCK_PATH}.d" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

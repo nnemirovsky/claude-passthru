@@ -306,14 +306,10 @@ pcre_match() {
   local rc=0
   perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$subject" "$pattern" 2>/dev/null
   rc=$?
-  if [ "$rc" -eq 0 ]; then
-    return 0
-  elif [ "$rc" -eq 1 ]; then
-    return 1
-  else
-    # Non-0/1 exit (typically 255 from perl's die on bad regex).
-    return 2
-  fi
+  # Perl exits 0 on match, 1 on no-match, 255 on die from a bad regex. Anything
+  # >=2 (including 255) collapses to our "bad pattern" sentinel.
+  [ "$rc" -ge 2 ] && return 2
+  return $rc
 }
 
 # ---------------------------------------------------------------------------
@@ -352,8 +348,9 @@ match_rule() {
   fi
 
   # 2. Check .match object (if present and non-empty) against tool_input fields.
-  # We iterate keys via jq; for each key, we extract the field from tool_input
-  # and PCRE-match it. Missing/null fields fail the rule.
+  # Stream (key, pattern) records from a single jq invocation. Bash's command
+  # substitution strips NUL bytes, so we feed the NUL-separated stream from
+  # jq directly into `read -d ''` via process substitution.
   local match_type
   match_type="$(jq -r '.match // empty | type' <<<"$rule" 2>/dev/null)"
   if [ "$match_type" != "object" ]; then
@@ -363,49 +360,42 @@ match_rule() {
 
   local match_keys_count
   match_keys_count="$(jq -r '.match | length' <<<"$rule" 2>/dev/null)"
-  if [ "$match_keys_count" = "0" ]; then
-    # Empty match object - match any input.
+  if [ -z "$match_keys_count" ] || [ "$match_keys_count" = "0" ]; then
     return 0
   fi
 
-  # Stream key=pattern pairs as NUL-delimited records for safe iteration.
-  # Format per record: key\npattern (keys contain no newline per JSON spec; patterns can).
-  # We use a marker line to separate records since patterns may contain \n (regex anchors etc.
-  # usually don't but literal newline in regex is possible, e.g. multiline patterns).
-  # jq's @tsv would mangle tabs; instead we use a record separator approach.
-  local keys_json
-  keys_json="$(jq -c '.match | to_entries' <<<"$rule" 2>/dev/null)"
-  if [ -z "$keys_json" ] || [ "$keys_json" = "null" ]; then
-    return 0
-  fi
-
-  local count i key pat field field_null
-  count="$match_keys_count"
-  for ((i = 0; i < count; i++)); do
-    key="$(jq -r ".[${i}].key" <<<"$keys_json" 2>/dev/null)"
-    pat="$(jq -r ".[${i}].value" <<<"$keys_json" 2>/dev/null)"
+  # Stream key\x01pattern\x00 records. \x01 separates key from pattern within
+  # a record (keys per JSON spec contain no \x01); \x00 ends each record.
+  # `read -d ''` reads up to the next NUL, never seeing it as input data.
+  local rec key pat field field_present rc
+  while IFS= read -r -d '' rec; do
+    key="${rec%%$'\x01'*}"
+    pat="${rec#*$'\x01'}"
     if [ -z "$key" ]; then
-      # Shouldn't happen for valid rules, but be defensive.
+      # Defensive: empty key from a malformed rule.
       return 1
     fi
-    # Extract the field from tool_input. Detect null/missing distinctly from empty string.
-    # Use jq --arg to avoid shell-injection via crafted match-key names (a key
-    # containing a double-quote would otherwise break or alter the jq program).
-    field_null="$(jq -r --arg k "$key" 'if has($k) and (.[$k] != null) then "0" else "1" end' <<<"$tool_input" 2>/dev/null)"
-    if [ "$field_null" != "0" ]; then
-      # Field missing or null -> rule does not match.
+    # Detect null/missing distinct from empty string. Use --arg to avoid
+    # shell-injection via crafted key names.
+    field_present="$(jq -r --arg k "$key" 'if has($k) and (.[$k] != null) then "1" else "0" end' <<<"$tool_input" 2>/dev/null)"
+    if [ "$field_present" != "1" ]; then
       return 1
     fi
     field="$(jq -r --arg k "$key" '.[$k] // ""' <<<"$tool_input" 2>/dev/null)"
     pcre_match "$field" "$pat"
-    local rc=$?
+    rc=$?
     if [ "$rc" -eq 2 ]; then
       return 2
     fi
     if [ "$rc" -ne 0 ]; then
       return 1
     fi
-  done
+  done < <(jq -j '
+    .match
+    | to_entries
+    | map("\(.key)\u0001\(.value)\u0000")
+    | add // ""
+  ' <<<"$rule" 2>/dev/null)
 
   return 0
 }

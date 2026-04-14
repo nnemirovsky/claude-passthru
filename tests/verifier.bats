@@ -273,6 +273,23 @@ EOF
   [ "$status" -eq 1 ]
 }
 
+@test "--scope=user (equals form) ignores project files" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{"version":1,"allow":[{"tool":"Bash","match":{"command":"^ls"}}],"deny":[]}
+EOF
+  place "$PROJ_ROOT/.claude/passthru.json" "invalid-regex.json"
+  run_verify --scope=user
+  [ "$status" -eq 0 ]
+}
+
+@test "--format=json (equals form) emits valid JSON" {
+  place "$USER_ROOT/.claude/passthru.json" "user-only.json"
+  run_verify --format=json
+  [ "$status" -eq 0 ]
+  run jq -e '.status == "ok"' <<<"$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "--format json: clean run emits valid JSON with counts" {
   place "$USER_ROOT/.claude/passthru.json" "user-only.json"
   run_verify --format json

@@ -240,17 +240,14 @@ EOF
 
 # -- --format raw -----------------------------------------------------------
 
-@test "--format raw emits the same canonical JSONL the file holds" {
-  # NOTE: --format raw still funnels lines through `jq -c '.'` for parse
-  # validation, so each line is canonicalized (key order, spacing). This test
-  # asserts on the canonical forms matching, NOT on byte-for-byte preservation
-  # of the on-disk format.
+@test "--format raw emits canonicalized JSONL (each line jq-validated)" {
+  # `--format raw` re-serializes each fixture line through `jq -c '.'`, so
+  # the output matches the canonical form, not the byte-for-byte on-disk
+  # text. (Renamed from "passes JSONL unchanged" - that was misleading.)
   write_fixture
   run_log --format raw
   [ "$status" -eq 0 ]
 
-  # Build expected by piping each fixture line through `jq -c '.'` so we
-  # compare like-against-like.
   local got expected
   got="$(printf '%s' "$output")"
   expected="$(jq -c '.' "$LOG_PATH" | tr -d '\r')"
@@ -448,8 +445,11 @@ EOF
   [[ "$output" == *"blocked rm -rf"* ]]
 }
 
-@test "table truncates long reasons to fit ~60 chars with ellipsis" {
-  # Overwrite the log with one line whose reason is 100 chars.
+@test "table truncates long reasons (100 char reason -> ellipsis, full string absent)" {
+  # Overwrite the log with one line whose reason is 100 chars (well above the
+  # ~60-char visible width we render). Assert positively: ellipsis present,
+  # full 100-char reason absent. (Renamed from a double-negative title to
+  # match how the test actually reads.)
   local longreason
   longreason="$(printf 'x%.0s' $(seq 1 100))"
   cat > "$LOG_PATH" <<EOF
@@ -459,9 +459,62 @@ EOF
   [ "$status" -eq 0 ]
   # Ellipsis present in reason column.
   [[ "$output" == *"..."* ]]
-  # Full 100-char reason is NOT in output.
-  if printf '%s' "$output" | grep -q "$longreason"; then
-    return 1
+  # Full 100-char reason is NOT in output (verbatim, not as a regex pattern).
+  [[ "$output" != *"$longreason"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Additional edge cases
+# ---------------------------------------------------------------------------
+
+@test "--since with bogus-but-Z-shaped ISO ('99999-04-14T...') exits 2" {
+  write_fixture
+  # Looks like ISO 8601 (Z suffix, dashes/colons), but year 99999 is out of
+  # range for both BSD and GNU date. compute_cutoff -> parse_iso_to_epoch
+  # must reject it cleanly rather than silently treating it as 0.
+  run_log --since '99999-04-14T00:00:00Z' --format raw
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid --since"* ]]
+}
+
+@test "--tail with a negative number exits 2" {
+  # The flag-parser's regex requires non-negative digits, so `-5` fails the
+  # ^[0-9]+$ check before any processing.
+  run_log --tail '-5'
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--tail"* ]]
+}
+
+@test "filter that matches zero entries -> 'no entries' on stderr, exit 0" {
+  write_fixture
+  # No entries have event 'never-emitted-event'.
+  run_log --event '^never-emitted-event$' --format raw
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no entries"* ]]
+}
+
+@test "--enable is idempotent: second call leaves sentinel intact and exits 0" {
+  [ ! -e "$SENT_PATH" ]
+  run_log --enable
+  [ "$status" -eq 0 ]
+  [ -e "$SENT_PATH" ]
+  # Capture mtime to make sure the second enable does not blow it away.
+  local mtime_before mtime_after
+  if [ "$(uname -s)" = "Darwin" ]; then
+    mtime_before="$(stat -f '%m' "$SENT_PATH")"
+  else
+    mtime_before="$(stat -c '%Y' "$SENT_PATH")"
   fi
-  return 0
+  run_log --enable
+  [ "$status" -eq 0 ]
+  [ -e "$SENT_PATH" ]
+  if [ "$(uname -s)" = "Darwin" ]; then
+    mtime_after="$(stat -f '%m' "$SENT_PATH")"
+  else
+    mtime_after="$(stat -c '%Y' "$SENT_PATH")"
+  fi
+  # touch(1) bumps mtime; the file still exists. We do not assert mtime
+  # equality because touch is supposed to update it. We do assert the
+  # second call did not error.
+  [ -n "$mtime_after" ]
 }

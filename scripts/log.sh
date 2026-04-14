@@ -26,15 +26,31 @@ set -euo pipefail
 PASSTHRU_OS="$(uname -s)"
 
 # ---------------------------------------------------------------------------
-# Path helpers (mirror hook handlers)
+# Locate and source common.sh (passthru_user_home, audit_log_path, etc.)
 # ---------------------------------------------------------------------------
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/hooks/common.sh" ]; then
+  # shellcheck disable=SC1091
+  source "${CLAUDE_PLUGIN_ROOT}/hooks/common.sh"
+else
+  _PASSTHRU_LOG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _PASSTHRU_COMMON="${_PASSTHRU_LOG_DIR}/../hooks/common.sh"
+  if [ ! -f "$_PASSTHRU_COMMON" ]; then
+    printf 'log.sh: cannot locate hooks/common.sh (tried CLAUDE_PLUGIN_ROOT and %s)\n' \
+      "$_PASSTHRU_COMMON" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$_PASSTHRU_COMMON"
+fi
 
-passthru_user_home() {
-  printf '%s\n' "${PASSTHRU_USER_HOME:-$HOME}"
-}
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+# passthru_user_home and audit_log_path live in common.sh; reuse them so the
+# log viewer cannot drift from the hook handlers' notion of "where the log is".
 
 default_log_path() {
-  printf '%s/.claude/passthru-audit.log\n' "$(passthru_user_home)"
+  audit_log_path
 }
 
 sentinel_path() {
@@ -165,43 +181,38 @@ color_for_event() {
   esac
 }
 
+# date_local <epoch> <strftime-fmt>: format an epoch via the local timezone,
+# papering over the BSD vs GNU date matrix. Empty output on failure.
+date_local() {
+  local epoch="$1" fmt="$2"
+  if [ "$PASSTHRU_OS" = "Darwin" ]; then
+    date -j -r "$epoch" +"$fmt" 2>/dev/null
+  else
+    date -d "@$epoch" +"$fmt" 2>/dev/null
+  fi
+}
+
 # iso_to_local_display <iso8601> <today_date>
 # Prints HH:MM:SS if the date matches $today_date (local YYYY-MM-DD),
-# otherwise YYYY-MM-DD HH:MM.
+# otherwise YYYY-MM-DD HH:MM. Falls back to the raw ISO string on date(1)
+# failure so we never lose the timestamp.
 iso_to_local_display() {
   local iso="$1" today="$2"
-  local epoch local_date short_date
-  if [ "$PASSTHRU_OS" = "Darwin" ]; then
-    epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null || true)"
-  else
-    epoch="$(date -u -d "$iso" +%s 2>/dev/null || true)"
-  fi
-  if [ -z "$epoch" ]; then
+  local epoch local_date out
+  if ! epoch="$(parse_iso_to_epoch "$iso" 2>/dev/null)"; then
     printf '%s' "$iso"
     return 0
   fi
-  if [ "$PASSTHRU_OS" = "Darwin" ]; then
-    local_date="$(date -j -r "$epoch" +%Y-%m-%d 2>/dev/null || echo '')"
-  else
-    local_date="$(date -d "@$epoch" +%Y-%m-%d 2>/dev/null || echo '')"
-  fi
+  local_date="$(date_local "$epoch" '%Y-%m-%d')"
   if [ "$local_date" = "$today" ]; then
-    if [ "$PASSTHRU_OS" = "Darwin" ]; then
-      date -j -r "$epoch" +'%H:%M:%S' 2>/dev/null || printf '%s' "$iso"
-    else
-      date -d "@$epoch" +'%H:%M:%S' 2>/dev/null || printf '%s' "$iso"
-    fi
+    out="$(date_local "$epoch" '%H:%M:%S')"
   else
-    if [ "$PASSTHRU_OS" = "Darwin" ]; then
-      short_date="$(date -j -r "$epoch" +'%Y-%m-%d %H:%M' 2>/dev/null || echo '')"
-    else
-      short_date="$(date -d "@$epoch" +'%Y-%m-%d %H:%M' 2>/dev/null || echo '')"
-    fi
-    if [ -n "$short_date" ]; then
-      printf '%s' "$short_date"
-    else
-      printf '%s' "$iso"
-    fi
+    out="$(date_local "$epoch" '%Y-%m-%d %H:%M')"
+  fi
+  if [ -n "$out" ]; then
+    printf '%s' "$out"
+  else
+    printf '%s' "$iso"
   fi
 }
 

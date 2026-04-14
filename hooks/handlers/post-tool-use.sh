@@ -113,12 +113,21 @@ is_denied_response() {
     return 0
   fi
   # Error messages carrying a permission marker.
-  # Anchored tokens (whole word + boundary) so unrelated phrases like
-  # "Updated file permissions to 0644" do not flip into a deny classification.
+  # The token list covers the variants we have seen Claude Code emit and the
+  # adjacent shapes other tools might surface in the wild:
+  #   permission[- _]denied  - "permission denied", "permission-denied",
+  #                            "permission_denied"
+  #   access[- _]denied      - same set
+  #   not[- _]allowed        - "not allowed", "not-allowed", "not_allowed"
+  #   blocked / denied       - whole-word only (\b...\b) so unrelated copy
+  #                            like "Updated file permissions to 0644" or
+  #                            "denied list updated" does not flip the bit.
+  # The whole-word anchors are the load-bearing piece: the original regex
+  # matched every "permission" substring and produced false positives.
   local err status
   err="$(jq -r '(.error // .errorMessage // .message // "") | tostring' <<<"$resp" 2>/dev/null || echo '')"
   if [ -n "$err" ]; then
-    if printf '%s' "$err" | grep -qiE '(permission[- ]?denied|access[- ]?denied|not[- ]?allowed|\bblocked\b|\bdenied\b)'; then
+    if printf '%s' "$err" | grep -qiE '(permission[- _]?denied|access[- _]?denied|not[- _]?allowed|\bblocked\b|\bdenied\b)'; then
       return 0
     fi
   fi

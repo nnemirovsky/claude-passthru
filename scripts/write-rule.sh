@@ -19,10 +19,10 @@
 #   6. On success: delete the backup, exit 0.
 #
 # Concurrency:
-#   A lock file at $PASSTHRU_USER_HOME/.claude/passthru.write.lock serializes
-#   concurrent writes. Uses flock(1) when available, otherwise a mkdir-based
-#   fallback (mkdir is atomic on POSIX filesystems). 5s timeout. Released via
-#   trap EXIT.
+#   A lock directory at $PASSTHRU_USER_HOME/.claude/passthru.write.lock.d
+#   serializes concurrent writers. mkdir is atomic on every POSIX filesystem
+#   we support (Linux/macOS local + NFS), works without flock(1) on the path,
+#   and fails predictably under contention. 5s timeout, released via trap EXIT.
 
 set -euo pipefail
 
@@ -92,38 +92,27 @@ TARGET_DIR="$(dirname "$TARGET")"
 mkdir -p "$TARGET_DIR"
 
 # ---------------------------------------------------------------------------
-# Lock acquisition
+# Lock acquisition (mkdir-only)
 # ---------------------------------------------------------------------------
 # The lock lives under the user scope even for project writes, because that's
 # the "one true place" across concurrent projects for a single user.
+# We use mkdir exclusively: it is atomic on every POSIX filesystem we care
+# about, works without flock(1), and gives predictable behaviour under
+# contention with no need for two parallel code paths.
 USER_CLAUDE_DIR="${PASSTHRU_USER_HOME:-$HOME}/.claude"
 mkdir -p "$USER_CLAUDE_DIR"
 LOCK_PATH="$USER_CLAUDE_DIR/passthru.write.lock"
+LOCK_DIR="${LOCK_PATH}.d"
 LOCK_TIMEOUT="${PASSTHRU_WRITE_LOCK_TIMEOUT:-5}"
 
-LOCK_FD=""
-LOCK_HELD=""  # "flock" | "mkdir" | ""
+LOCK_HELD=0
 
-acquire_lock_flock() {
-  # Open fd 9 on the lockfile, block up to LOCK_TIMEOUT seconds.
-  exec 9>"$LOCK_PATH"
-  if flock -w "$LOCK_TIMEOUT" 9 2>/dev/null; then
-    LOCK_FD=9
-    LOCK_HELD="flock"
-    return 0
-  fi
-  exec 9>&-
-  return 1
-}
-
-acquire_lock_mkdir() {
-  # mkdir is atomic. Spin up to LOCK_TIMEOUT seconds, sleeping 0.1s between tries.
-  local lockdir="${LOCK_PATH}.d"
+acquire_lock() {
   local deadline
   deadline=$(( $(date +%s) + LOCK_TIMEOUT ))
   while :; do
-    if mkdir "$lockdir" 2>/dev/null; then
-      LOCK_HELD="mkdir"
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      LOCK_HELD=1
       return 0
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -134,27 +123,15 @@ acquire_lock_mkdir() {
 }
 
 release_lock() {
-  case "$LOCK_HELD" in
-    flock)
-      [ -n "$LOCK_FD" ] && exec 9>&- 2>/dev/null || true
-      ;;
-    mkdir)
-      rmdir "${LOCK_PATH}.d" 2>/dev/null || true
-      ;;
-  esac
-  LOCK_HELD=""
+  if [ "$LOCK_HELD" -eq 1 ]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    LOCK_HELD=0
+  fi
 }
 
-if command -v flock >/dev/null 2>&1; then
-  if ! acquire_lock_flock; then
-    printf 'write-rule.sh: failed to acquire lock %s within %ss\n' "$LOCK_PATH" "$LOCK_TIMEOUT" >&2
-    exit 1
-  fi
-else
-  if ! acquire_lock_mkdir; then
-    printf 'write-rule.sh: failed to acquire lock %s within %ss\n' "$LOCK_PATH" "$LOCK_TIMEOUT" >&2
-    exit 1
-  fi
+if ! acquire_lock; then
+  printf 'write-rule.sh: failed to acquire lock %s within %ss\n' "$LOCK_PATH" "$LOCK_TIMEOUT" >&2
+  exit 1
 fi
 
 # All subsequent cleanup runs via trap, covering early exits.

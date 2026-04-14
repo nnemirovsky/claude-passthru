@@ -14,8 +14,16 @@ commands/
   verify.md            /passthru:verify slash command (prompt-based)
   log.md               /passthru:log slash command (prompt-based)
 hooks/
-  hooks.json           registers PreToolUse + PostToolUse handlers with matcher "*"
-  common.sh            shared library: rule loading, merging, schema validation, PCRE matching
+  hooks.json           registers PreToolUse + PostToolUse handlers with matcher "*", timeout 10s each
+  common.sh            shared library. Functions:
+                         * load_rules / validate_rules (merge + schema-check)
+                         * pcre_match / match_rule / find_first_match (rule matching)
+                         * passthru_user_home, passthru_tmpdir, passthru_iso_ts,
+                           passthru_sha256, sanitize_tool_use_id (env + path helpers)
+                         * audit_enabled, audit_log_path, emit_passthrough
+                           (audit + output helpers)
+                       Sourced by hook handlers AND by scripts/log.sh,
+                       scripts/verify.sh, scripts/write-rule.sh.
   handlers/
     pre-tool-use.sh    main hook: loads rules, matches, emits allow/deny/passthrough
     post-tool-use.sh   classifies native-dialog outcomes into asked_* events (audit only)
@@ -119,23 +127,39 @@ Checks performed (in order, across the merged set):
 
 `scripts/write-rule.sh` (also called by `bootstrap.sh --write` and the
 `/passthru:add`, `/passthru:suggest` commands) serializes concurrent writers
-via a single user-scope lock at `~/.claude/passthru.write.lock`. Two backends
-exist:
-
-* **flock** when the binary is on `$PATH` (Linux distros, macOS via Homebrew).
-  Uses `flock -w "$LOCK_TIMEOUT" 9` against the lockfile.
-* **mkdir fallback** otherwise (default macOS install). Uses
-  `~/.claude/passthru.write.lock.d` as an atomic directory marker, polling at
-  100 ms intervals.
+via a single user-scope lock directory at
+`~/.claude/passthru.write.lock.d`. The lock uses `mkdir`, which is atomic on
+every POSIX filesystem we target (local Linux/macOS plus NFS), works without
+any extra dependency, and polls at 100 ms intervals while waiting.
 
 The lock-acquisition timeout is 5 seconds by default and is configurable via
 `PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment. Both
 `tests/write_rule.bats` (concurrent test, lock-timeout test) and the
 production write paths exercise the env override.
 
-The lock file lives under the **user** scope even for project-scope writes
-because it is the single per-user serialization point across concurrent
-project shells.
+The lock directory lives under the **user** scope even for project-scope
+writes because it is the single per-user serialization point across
+concurrent project shells.
+
+## Hook timeout
+
+Both `PreToolUse` and `PostToolUse` are registered with `"timeout": 10` in
+`hooks/hooks.json`. The reason for 10 seconds (rather than 2-3):
+
+* `load_rules` shells out to `jq` once per rule file (up to 4 files), once for
+  the parse check, once for normalization, and once for the merge.
+* `find_first_match` runs `match_rule` per rule, which itself forks a `perl`
+  PCRE check per regex.
+* `audit_write_breadcrumb` snapshots two `sha256` digests of `settings.json`
+  files plus a `jq` invocation to build the JSON envelope.
+* On cold caches, slow disks, or under heavy IO load, a hot path with 50+
+  rules + audit enabled has measured 2-4 seconds in the wild.
+* The handler always exits 0 (fail-open) so a timeout would only ever lose
+  audit fidelity, never block a tool call. Choosing 10s leaves 5x headroom
+  over typical worst case.
+
+Lower the timeout only after profiling on the target hardware. Higher is
+fine.
 
 ## Releases
 

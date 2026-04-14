@@ -287,12 +287,30 @@ else
   exit 0
 fi
 
+# rule_pattern_summary: emit a human-readable summary of the rule's pattern
+# field for log output. Format:
+#   - .tool only            -> "<tool-regex>"
+#   - .tool + .match        -> "<tool-regex> | key1=<pat>, key2=<pat>"
+#   - .match only           -> "key1=<pat>, key2=<pat>"
+#   - neither               -> ""
+# Captures all match keys (not just the first) so multi-key rules are
+# faithfully represented in the audit log.
+rule_pattern_summary() {
+  local rule="$1"
+  jq -r '
+    [ (if .tool then .tool else empty end) ]
+    + [ (.match // {} | to_entries | map("\(.key)=\(.value)") | join(", ")) ]
+    | map(select(. != ""))
+    | join(" | ")
+  ' <<<"$rule" 2>/dev/null
+}
+
 if [ -n "$DENY_HIT" ]; then
   # find_first_match returns "<index>\t<rule-json>" so we split here.
   DENY_IDX="${DENY_HIT%%$'\t'*}"
   DENY_MATCH="${DENY_HIT#*$'\t'}"
   REASON="$(jq -r '.reason // ""' <<<"$DENY_MATCH" 2>/dev/null)"
-  PATTERN="$(jq -r '.tool // (.match // {} | to_entries | .[0].value // "")' <<<"$DENY_MATCH" 2>/dev/null)"
+  PATTERN="$(rule_pattern_summary "$DENY_MATCH")"
   if [ -n "$REASON" ]; then
     MSG="passthru deny: ${REASON} [${PATTERN}]"
   else
@@ -317,7 +335,7 @@ if [ -n "$ALLOW_HIT" ]; then
   ALLOW_IDX="${ALLOW_HIT%%$'\t'*}"
   ALLOW_MATCH="${ALLOW_HIT#*$'\t'}"
   REASON="$(jq -r '.reason // ""' <<<"$ALLOW_MATCH" 2>/dev/null)"
-  PATTERN="$(jq -r '.tool // (.match // {} | to_entries | .[0].value // "")' <<<"$ALLOW_MATCH" 2>/dev/null)"
+  PATTERN="$(rule_pattern_summary "$ALLOW_MATCH")"
   if [ -n "$REASON" ]; then
     MSG="passthru allow: ${REASON}"
   else

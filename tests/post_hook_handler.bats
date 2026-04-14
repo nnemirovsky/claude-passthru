@@ -110,6 +110,24 @@ write_settings() {
   [ ! -f "$(audit_log)" ]
 }
 
+@test "audit disabled + breadcrumb + all-punctuation tool_use_id -> breadcrumb NOT unlinked" {
+  # Companion to the path-traversal sanitization test. When audit is
+  # disabled, the self-heal branch sanitizes tool_use_id and only unlinks
+  # if the sanitized id is non-empty. A tool_use_id consisting entirely of
+  # filesystem-stripped chars (e.g. "../") sanitizes to empty -> no
+  # unlink, no traversal, no error. We plant a breadcrumb that the empty
+  # sanitized id would never resolve to (i.e. an unrelated id) and prove
+  # it survives.
+  write_breadcrumb "untouched" "Bash" '{"command":"ls"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"...///","tool_response":{"stdout":"x"}}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'{"continue": true}'* ]]
+  [ ! -f "$(audit_log)" ]
+  # The unrelated breadcrumb stays put because the sanitized tool_use_id was
+  # empty and the self-heal branch correctly skipped any unlink attempt.
+  [ -f "$(crumb_path "untouched")" ]
+}
+
 # ---------------------------------------------------------------------------
 # Enabled but no breadcrumb (PreToolUse decided allow/deny itself, or first
 # run after enabling audit)
@@ -359,6 +377,116 @@ write_settings() {
   [ "$output" = "asked_denied_once" ]
 }
 
+@test "is_denied_response: errorMessage field with 'access denied' -> denied" {
+  enable_audit
+  write_breadcrumb "tidEM" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidEM","tool_response":{"errorMessage":"access denied by policy"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: message field with 'not allowed' -> denied" {
+  enable_audit
+  write_breadcrumb "tidMSG" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidMSG","tool_response":{"message":"not allowed for this user"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: error with 'access-denied' (hyphenated) -> denied" {
+  enable_audit
+  write_breadcrumb "tidAD" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidAD","tool_response":{"error":"access-denied: insufficient privileges"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: error with 'not_allowed' (underscored) -> denied" {
+  enable_audit
+  write_breadcrumb "tidNA" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidNA","tool_response":{"error":"action not_allowed"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: status == 'denied' -> denied" {
+  enable_audit
+  write_breadcrumb "tidST1" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidST1","tool_response":{"status":"denied"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: status == 'permission_denied' -> denied" {
+  enable_audit
+  write_breadcrumb "tidST2" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidST2","tool_response":{"status":"permission_denied"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: status == 'permissionDenied' (camelCase) -> denied" {
+  enable_audit
+  write_breadcrumb "tidST3" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidST3","tool_response":{"status":"permissionDenied"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: status == 'blocked' -> denied" {
+  enable_audit
+  write_breadcrumb "tidST4" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidST4","tool_response":{"status":"blocked"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: state == 'denied' (alternate field) -> denied" {
+  enable_audit
+  write_breadcrumb "tidSTATE" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidSTATE","tool_response":{"state":"denied"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: error with whole-word 'blocked' -> denied" {
+  enable_audit
+  write_breadcrumb "tidBL" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidBL","tool_response":{"error":"request was blocked by policy"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_denied_once" ]
+}
+
+@test "is_denied_response: status == 'success' (positive) -> NOT denied" {
+  enable_audit
+  write_breadcrumb "tidOK" "Bash" '{"command":"x"}' "" ""
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"x"},"tool_use_id":"tidOK","tool_response":{"status":"success"}}'
+  [ "$status" -eq 0 ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_once" ]
+}
+
 # ---------------------------------------------------------------------------
 # entries_look_tailored: false-positive guard
 # ---------------------------------------------------------------------------
@@ -423,16 +551,42 @@ write_settings() {
 
 @test "tool_use_id with path-traversal characters -> sanitized, no traversal" {
   enable_audit
-  # Plant the breadcrumb that the SANITIZED id would resolve to.
-  safe_id="abc"
-  write_breadcrumb "$safe_id" "Bash" '{"command":"ls"}' "" ""
-  # Pass a tool_use_id with traversal characters; sanitizer should strip them.
+  # The sanitizer in common.sh strips every character that is not in
+  # [A-Za-z0-9_-]. So `../../etc/abc` collapses to literal `etcabc`. Plant
+  # a breadcrumb at the SANITIZED path so we can prove the handler used it,
+  # i.e. the lookup landed on the safe path and not on the original
+  # traversal-laced one.
+  sanitized_id="etcabc"
+  write_breadcrumb "$sanitized_id" "Bash" '{"command":"ls"}' "" ""
+  # Pre-condition: the `etc/abc` file must not exist anywhere under the
+  # tmpdir hierarchy beforehand.
+  [ ! -e "$BCTMP/etc/abc" ]
+
   run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"../../etc/abc","tool_response":{"stdout":"x"}}'
   [ "$status" -eq 0 ]
-  # Either the handler consumed the safe-id breadcrumb (and unlinked it)
-  # OR it found nothing and no-oped. Both outcomes are safe; what we MUST
-  # guarantee is that no file was touched outside $TMPDIR.
-  [ ! -e "$BCTMP/../../etc/abc" ] || true
-  # The safe-id breadcrumb has either been consumed (asked_allowed_once) or
-  # left untouched (no breadcrumb match). We only assert no traversal.
+
+  # Hard guarantee 1: no file was created at the literal traversal path.
+  # If the sanitizer was bypassed, the breadcrumb lookup would attempt to
+  # `cat $TMPDIR/passthru-pre-../../etc/abc.json` and `rm -f` it, both of
+  # which would (best case) silently fail or (worst case) escape $TMPDIR.
+  [ ! -e "$BCTMP/etc/abc" ]
+  [ ! -e "$BCTMP/../etc/abc" ]
+  [ ! -e "$BCTMP/passthru-pre-../../etc/abc.json" ]
+
+  # Hard guarantee 2: the breadcrumb at the sanitized path was consumed.
+  # If sanitization stripped the traversal characters as expected
+  # (-> `etcabc`), the handler found, read, and unlinked the breadcrumb at
+  # `$TMPDIR/passthru-pre-etcabc.json`, then wrote a log line. That log
+  # line is the strongest positive proof the path-traversal characters were
+  # stripped, not just ignored.
+  [ ! -f "$(crumb_path "$sanitized_id")" ]
+  [ -f "$(audit_log)" ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_once" ]
+  # The audit log records the *raw* tool_use_id (the unsanitized one),
+  # since that is what was on the wire. Sanitization only affects the
+  # filesystem path.
+  run jq -r '.tool_use_id' <<<"$line"
+  [ "$output" = "../../etc/abc" ]
 }

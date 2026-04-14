@@ -331,15 +331,24 @@ EOF
   # its allow JSON and exit 0. The audit log itself will be empty/missing.
   place "$USER_ROOT/.claude/passthru.json" "user-only.json"
   enable_audit
+  # Skip under root: r-x dirs are still writable for uid 0, so the
+  # fail-open path the test exercises will not actually fire.
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "running as root: chmod 555 does not deny writes to uid 0"
+  fi
   chmod 555 "$USER_ROOT/.claude" 2>/dev/null || skip "cannot chmod test dir"
   run_handler '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"tool_use_id":"tFAIL"}'
   # Restore so teardown can rm -rf.
   chmod 755 "$USER_ROOT/.claude" 2>/dev/null || true
   [ "$status" -eq 0 ]
-  out="$output"
-  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$out" 2>/dev/null || true)"
-  # Decision must still be allow even though the audit write failed.
-  [ "$decision" = "allow" ]
+  # Tighten: extract the JSON envelope explicitly, then assert decision.
+  # `$output` lumps stderr (the permission-denied warning) with stdout
+  # (the JSON envelope), so we grep the JSON line out before parsing.
+  json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
+  [ -n "$json_line" ]
+  run jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line"
+  [ "$status" -eq 0 ]
+  [ "$output" = "allow" ]
 }
 
 @test "audit log lines are valid JSONL (each line parses)" {
@@ -390,4 +399,56 @@ EOF
   [ "$(jq -r '.rule_index' <<<"$line")" = "null" ]
   [ "$(jq -r '.pattern' <<<"$line")" = "null" ]
   [ "$(jq -r '.reason' <<<"$line")" = "null" ]
+}
+
+# ---------------------------------------------------------------------------
+# Fail-open: bad regex in rule (find_first_match rc=2 path)
+# ---------------------------------------------------------------------------
+
+@test "handler: invalid regex in deny rule -> fail-open passthrough + stderr" {
+  # Plant a passthru.json with a syntactically broken regex in the deny list.
+  # find_first_match must return rc=2; the handler must emit `{"continue":
+  # true}` on stdout and a diagnostic on stderr instead of denying outright.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{"version":1,"allow":[],"deny":[{"tool":"Bash","match":{"command":"(unclosed"}}]}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"}}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'{"continue": true}'* ]]
+  # Stderr diagnostic must be present (run lumps stdout+stderr).
+  [[ "$output" == *"deny rule regex error"* ]] || [[ "$output" == *"regex compile failure"* ]]
+}
+
+@test "handler: invalid regex in allow rule -> fail-open passthrough + stderr" {
+  # Same shape as above but the bad regex is in allow[]. Deny[] is empty so
+  # the handler reaches the allow check, hits rc=2, and falls through.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{"version":1,"allow":[{"tool":"Bash","match":{"command":"[unclosed"}}],"deny":[]}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"ls"}}'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'{"continue": true}'* ]]
+  [[ "$output" == *"allow rule regex error"* ]] || [[ "$output" == *"regex compile failure"* ]]
+}
+
+@test "audit log: multi-key match rule logs ALL keys in .pattern (not just first)" {
+  # rule_pattern_summary used to call `to_entries | .[0].value`, dropping
+  # every key after the first. A multi-key match (e.g. WebFetch with both
+  # url and prompt regex) should surface all keys in the audit pattern.
+  enable_audit
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{"version":1,"allow":[{"tool":"WebFetch","match":{"url":"^https://example\\.com/","prompt":"^summarize "},"reason":"summary fetch"}],"deny":[]}
+EOF
+  payload="$(jq -cn --arg u "https://example.com/x" --arg p "summarize this" \
+    '{tool_name:"WebFetch",tool_input:{url:$u,prompt:$p},tool_use_id:"tMK"}')"
+  run_handler "$payload"
+  [ "$status" -eq 0 ]
+  [ -f "$(audit_log)" ]
+  line="$(head -n1 "$(audit_log)")"
+  pat="$(jq -r '.pattern' <<<"$line")"
+  # Both keys must appear in the summary.
+  [[ "$pat" == *"url="* ]]
+  [[ "$pat" == *"prompt="* ]]
+  # Tool segment present too (because the rule has .tool).
+  [[ "$pat" == *"WebFetch"* ]]
 }
