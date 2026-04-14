@@ -332,14 +332,14 @@ Atomic write wrapper (`write-rule.sh`):
 - Create: `/Users/nemirovsky/Developer/claude-passthru/commands/suggest.md`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/command_suggest_manual.md`
 
-- [ ] write `commands/suggest.md` with frontmatter: `description`, `argument-hint: "[tool-or-command-hint]"`. Exposed as `/passthru:suggest`.
-- [ ] prompt body instructs Claude to: scan recent tool-call events in the session transcript, identify the last permission-prompt-triggering tool call (or the one matching the user's hint), propose a regex rule that generalizes that class of command without overfitting.
-- [ ] prompt explicitly tells Claude to explain the regex, show matched/non-matched examples, then ask the user to pick scope (`user`|`project`) and confirm before writing.
-- [ ] on confirmation, shell out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/write-rule.sh <scope> allow <rule_json>` (same path as `/passthru:add`). On failure, surface the error.
-- [ ] extend the shared frontmatter bats test to cover `suggest.md`.
-- [ ] write manual test script: run a `gh api /repos/...` command that triggers native prompt, answer "yes once", then invoke `/passthru:suggest`, verify proposed regex is sensible, verify `write-rule.sh` ran and the rule landed.
-- [ ] manually verify in a live session.
-- [ ] run tests (bats) - must pass before task 8.
+- [x] write `commands/suggest.md` with frontmatter: `description`, `argument-hint: "[tool-or-command-hint]"`. Exposed as `/passthru:suggest`.
+- [x] prompt body instructs Claude to: scan recent tool-call events in the session transcript, identify the last permission-prompt-triggering tool call (or the one matching the user's hint), propose a regex rule that generalizes that class of command without overfitting.
+- [x] prompt explicitly tells Claude to explain the regex, show matched/non-matched examples, then ask the user to pick scope (`user`|`project`) and confirm before writing.
+- [x] on confirmation, shell out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/write-rule.sh <scope> allow <rule_json>` (same path as `/passthru:add`). On failure, surface the error.
+- [x] extend the shared frontmatter bats test to cover `suggest.md`.
+- [x] write manual test script: run a `gh api /repos/...` command that triggers native prompt, answer "yes once", then invoke `/passthru:suggest`, verify proposed regex is sensible, verify `write-rule.sh` ran and the rule landed.
+- [x] manual verification (deferred to Task 11).
+- [x] run tests (bats) - must pass before task 8.
 
 ### Task 8: /passthru:verify slash command
 

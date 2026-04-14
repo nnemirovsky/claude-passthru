@@ -7,8 +7,8 @@
 # its own line), and that the frontmatter contains non-empty `description`
 # and `argument-hint` keys.
 #
-# Covers: add.md (Task 6). Future tasks extend this file to cover
-# suggest.md, verify.md, and log.md.
+# Covers: add.md (Task 6), suggest.md (Task 7). Future tasks extend this
+# file to cover verify.md and log.md.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -113,5 +113,66 @@ frontmatter_value() {
   run grep -q 'user' "$COMMANDS_DIR/add.md"
   [ "$status" -eq 0 ]
   run grep -q 'project' "$COMMANDS_DIR/add.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Tests - commands/suggest.md
+# ---------------------------------------------------------------------------
+
+@test "commands/suggest.md exists" {
+  [ -f "$COMMANDS_DIR/suggest.md" ]
+}
+
+@test "commands/suggest.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/suggest.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/suggest.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/suggest.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/suggest.md body mentions write-rule.sh" {
+  run grep -q "write-rule.sh" "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions user and project scope" {
+  run grep -q 'user' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'project' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions allow and deny" {
+  run grep -q 'allow' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'deny' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions \$ARGUMENTS hint" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions narrow vs permissive tradeoff" {
+  run grep -qi 'narrow' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+  run grep -qi 'permissive' "$COMMANDS_DIR/suggest.md"
   [ "$status" -eq 0 ]
 }
