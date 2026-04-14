@@ -7,8 +7,8 @@
 # its own line), and that the frontmatter contains non-empty `description`
 # and `argument-hint` keys.
 #
-# Covers: add.md (Task 6), suggest.md (Task 7), verify.md (Task 8). Future
-# tasks extend this file to cover log.md.
+# Covers: add.md (Task 6), suggest.md (Task 7), verify.md (Task 8),
+# log.md (Task 8b).
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -250,10 +250,78 @@ frontmatter_value() {
 }
 
 # ---------------------------------------------------------------------------
+# Tests - commands/log.md
+# ---------------------------------------------------------------------------
+
+@test "commands/log.md exists" {
+  [ -f "$COMMANDS_DIR/log.md" ]
+}
+
+@test "commands/log.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/log.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/log.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/log.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/log.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/log.md frontmatter argument-hint mentions key flags" {
+  run frontmatter_value "$COMMANDS_DIR/log.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--since"* ]]
+  [[ "$output" == *"--event"* ]]
+  [[ "$output" == *"--tool"* ]]
+  [[ "$output" == *"--tail"* ]]
+  [[ "$output" == *"--format"* ]]
+  [[ "$output" == *"--enable"* ]]
+  [[ "$output" == *"--disable"* ]]
+  [[ "$output" == *"--status"* ]]
+}
+
+@test "commands/log.md body mentions log.sh" {
+  run grep -q "log.sh" "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/log.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/log.md body mentions \$ARGUMENTS pass-through" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/log.md body mentions audit sentinel" {
+  run grep -q 'passthru.audit.enabled' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/log.md body mentions key event categories" {
+  run grep -q 'allow' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'deny' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'passthrough' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'asked_' "$COMMANDS_DIR/log.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # Auto-iteration: every commands/*.md must have a well-formed frontmatter
 # block with non-empty description and argument-hint. Picks up new files
-# automatically so future tasks (e.g., log.md) get baseline coverage even
-# before explicit per-file tests are added.
+# automatically so future command additions get baseline coverage.
 # ---------------------------------------------------------------------------
 
 @test "every commands/*.md has frontmatter with description and argument-hint" {

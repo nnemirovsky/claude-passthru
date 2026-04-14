@@ -360,8 +360,8 @@ Atomic write wrapper (`write-rule.sh`):
 - Create: `/Users/nemirovsky/Developer/claude-passthru/commands/log.md`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/log_script.bats`
 
-- [ ] + implement `scripts/log.sh`: reads `~/.claude/passthru-audit.log` (override path via `--file`), formats JSONL entries for human viewing.
-- [ ] + flags:
+- [x] + implement `scripts/log.sh`: reads `~/.claude/passthru-audit.log` (override path via `--file`), formats JSONL entries for human viewing.
+- [x] + flags:
   - `--since <value>`: filter by time. Accepts ISO 8601 (`2026-04-14T00:00:00Z`), relative (`1h`, `24h`, `7d`), or `today`.
   - `--event <pattern>`: filter by event. Value is a regex matched against the `event` field. Examples: `allow`, `deny`, `^asked_`, `asked_allowed_(once|always)`.
   - `--tool <pattern>`: regex against `tool` field.
@@ -371,14 +371,14 @@ Atomic write wrapper (`write-rule.sh`):
   - `--disable`: rm the sentinel, exit 0 after printing "audit disabled".
   - `--status`: print `enabled`/`disabled` and the log file path, exit 0.
   - `--help`: short usage text.
-- [ ] + empty log / missing file -> print "no entries" to stderr, exit 0.
-- [ ] + table columns: time (local tz, `HH:MM:SS` if today, else `YYYY-MM-DD HH:MM`), event, source, tool, reason/detail. Truncate long reasons with ellipsis; full JSON is always available via `--format json` or `--format raw`.
-- [ ] + color scheme (tty only): green for `allow`/`asked_allowed_*`, red for `deny`/`asked_denied_*`, yellow for `passthrough`/`asked_allowed_unknown`.
-- [ ] + plain ASCII (no em-dashes, no fancy bullets). Use `|` column separators and ASCII box chars if any.
-- [ ] + `commands/log.md` slash command frontmatter: `description`, `argument-hint: "[--since 1h] [--event ...] [--tool ...] [--tail N] [--format table|json|raw] [--enable|--disable|--status]"`. Exposed as `/passthru:log`. Prompt body shells out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/log.sh $ARGUMENTS` and surfaces output.
-- [ ] + extend shared frontmatter bats test to cover `log.md`.
-- [ ] + bats tests for log.sh: empty/missing log -> "no entries"; mixed-event log + `--event allow` filter; `--since 1h` filters correctly against fixture timestamps; `--format json` emits valid JSON array; `--tail 2` returns last 2; `--enable` creates sentinel; `--disable` removes it; `--status` reports correctly in both states; bad `--since` value -> stderr + exit 2.
-- [ ] + run tests - must pass before task 9.
+- [x] + empty log / missing file -> print "no entries" to stderr, exit 0.
+- [x] + table columns: time (local tz, `HH:MM:SS` if today, else `YYYY-MM-DD HH:MM`), event, source, tool, reason/detail. Truncate long reasons with ellipsis; full JSON is always available via `--format json` or `--format raw`.
+- [x] + color scheme (tty only): green for `allow`/`asked_allowed_*`, red for `deny`/`asked_denied_*`, yellow for `passthrough`/`asked_allowed_unknown`.
+- [x] + plain ASCII (no em-dashes, no fancy bullets). Use `|` column separators and ASCII box chars if any.
+- [x] + `commands/log.md` slash command frontmatter: `description`, `argument-hint: "[--since 1h] [--event ...] [--tool ...] [--tail N] [--format table|json|raw] [--enable|--disable|--status]"`. Exposed as `/passthru:log`. Prompt body shells out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/log.sh $ARGUMENTS` and surfaces output.
+- [x] + extend shared frontmatter bats test to cover `log.md`.
+- [x] + bats tests for log.sh: empty/missing log -> "no entries"; mixed-event log + `--event allow` filter; `--since 1h` filters correctly against fixture timestamps; `--format json` emits valid JSON array; `--tail 2` returns last 2; `--enable` creates sentinel; `--disable` removes it; `--status` reports correctly in both states; bad `--since` value -> stderr + exit 2.
+- [x] + run tests - must pass before task 9.
 
 ### Task 9: Bootstrap script (one-time import from native rules)
 
