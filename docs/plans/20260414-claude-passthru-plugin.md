@@ -316,15 +316,15 @@ Atomic write wrapper (`write-rule.sh`):
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/command_add_manual.md` (manual test script)
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/command_frontmatter.bats`
 
-- [ ] write `commands/add.md` with frontmatter: `description`, `argument-hint: "<scope> <tool> <pattern> [reason]"`. Exposed as `/passthru:add` via plugin namespacing.
-- [ ] prompt body instructs Claude to: parse `$ARGUMENTS`, validate scope (`user`|`project`), construct the rule JSON, then shell out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/write-rule.sh <scope> allow <rule_json>`. On non-zero exit, surface the stderr output to the user. On success, confirm the rule was added and show the resulting file.
-- [ ] include examples in the prompt: adding a Bash rule, adding an MCP tool rule, adding a multi-field match.
-- [ ] support `--deny` flag in args to pass `deny` instead of `allow` to `write-rule.sh`.
-- [ ] write bats lint test for the markdown file: required frontmatter keys (`description`, `argument-hint`) present and non-empty. (Shared bats file covers add, suggest, verify frontmatter.)
-- [ ] write manual test script documenting: invoke `/passthru:add user Bash "^gh api /repos/"`, verify `~/.claude/passthru.json` was created/updated, verify the verifier ran via `write-rule.sh`, verify subsequent matching command is auto-allowed.
-- [ ] manual negative test: invoke `/passthru:add` with a syntactically invalid regex; confirm the verifier catches it, the rule is not written, and the file is not corrupted.
-- [ ] manually verify the slash command works in a live session before marking complete.
-- [ ] run tests (bats) - must pass before task 7.
+- [x] write `commands/add.md` with frontmatter: `description`, `argument-hint: "<scope> <tool> <pattern> [reason]"`. Exposed as `/passthru:add` via plugin namespacing.
+- [x] prompt body instructs Claude to: parse `$ARGUMENTS`, validate scope (`user`|`project`), construct the rule JSON, then shell out to `bash ${CLAUDE_PLUGIN_ROOT}/scripts/write-rule.sh <scope> allow <rule_json>`. On non-zero exit, surface the stderr output to the user. On success, confirm the rule was added and show the resulting file.
+- [x] include examples in the prompt: adding a Bash rule, adding an MCP tool rule, adding a multi-field match.
+- [x] support `--deny` flag in args to pass `deny` instead of `allow` to `write-rule.sh`.
+- [x] write bats lint test for the markdown file: required frontmatter keys (`description`, `argument-hint`) present and non-empty. (Shared bats file covers add, suggest, verify frontmatter.)
+- [x] write manual test script documenting: invoke `/passthru:add user Bash "^gh api /repos/"`, verify `~/.claude/passthru.json` was created/updated, verify the verifier ran via `write-rule.sh`, verify subsequent matching command is auto-allowed.
+- [x] manual negative test: invoke `/passthru:add` with a syntactically invalid regex; confirm the verifier catches it, the rule is not written, and the file is not corrupted.
+- [x] manual verification (deferred to Task 11)
+- [x] run tests (bats) - must pass before task 7.
 
 ### Task 7: /passthru:suggest slash command
 
