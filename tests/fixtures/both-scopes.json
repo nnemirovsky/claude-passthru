@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^gh\\s+api\\s+/repos/" },
+      "reason": "gh api repo calls"
+    }
+  ],
+  "deny": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^sudo(\\s|$)" },
+      "reason": "no sudo in project shells"
+    }
+  ]
+}

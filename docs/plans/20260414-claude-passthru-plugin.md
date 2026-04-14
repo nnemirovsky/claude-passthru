@@ -206,12 +206,12 @@ File locations:
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/fixtures/both-scopes.json`
 - Create: `/Users/nemirovsky/Developer/claude-passthru/tests/fixtures/imported-and-authored.json`
 
-- [ ] implement `load_rules` in `common.sh` that reads up to four files (`~/.claude/passthru.json`, `~/.claude/passthru.imported.json`, `$CWD/.claude/passthru.json`, `$CWD/.claude/passthru.imported.json`), tolerates missing, concatenates `.allow` and `.deny` arrays via `jq -s`, and outputs merged JSON on stdout.
-- [ ] implement `validate_rules <json>`: enforce `version: 1`, each entry has at least one of `tool` or `match`, each `match` value is a non-empty string. Do NOT pre-compile/validate PCRE at load time (per-rule `grep -P` roundtrips are slow and may reject valid user PCRE). Deep regex checks live in `scripts/verify.sh` (Task 5), not here. Regex errors at match time still surface with a clear message identifying the offending rule index.
-- [ ] handle: missing file (skip), empty file (treat as `{}`), malformed JSON (fail with file path).
-- [ ] write bats tests: user-only, project-only, both scopes merging, imported + authored in same scope, missing files, malformed JSON, schema violation.
-- [ ] write tests for deny+allow ordering preservation across all four files.
-- [ ] run tests - must pass before task 3.
+- [x] implement `load_rules` in `common.sh` that reads up to four files (`~/.claude/passthru.json`, `~/.claude/passthru.imported.json`, `$CWD/.claude/passthru.json`, `$CWD/.claude/passthru.imported.json`), tolerates missing, concatenates `.allow` and `.deny` arrays via `jq -s`, and outputs merged JSON on stdout.
+- [x] implement `validate_rules <json>`: enforce `version: 1`, each entry has at least one of `tool` or `match`, each `match` value is a non-empty string. Do NOT pre-compile/validate PCRE at load time (per-rule `grep -P` roundtrips are slow and may reject valid user PCRE). Deep regex checks live in `scripts/verify.sh` (Task 5), not here. Regex errors at match time still surface with a clear message identifying the offending rule index.
+- [x] handle: missing file (skip), empty file (treat as `{}`), malformed JSON (fail with file path).
+- [x] write bats tests: user-only, project-only, both scopes merging, imported + authored in same scope, missing files, malformed JSON, schema violation.
+- [x] write tests for deny+allow ordering preservation across all four files.
+- [x] run tests - must pass before task 3.
 
 ### Task 3: Rule matching engine (common.sh continued)
 

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Read",
+      "match": { "file_path": "^/Users/[^/]+/Developer/" },
+      "reason": "project source tree"
+    },
+    {
+      "tool": "^mcp__gemini-cli__",
+      "reason": "all gemini mcp calls"
+    }
+  ],
+  "deny": []
+}

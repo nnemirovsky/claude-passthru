@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^bash /Users/[^/]+/\\.claude/plugins/cache/" },
+      "reason": "imported from settings"
+    }
+  ],
+  "deny": []
+}

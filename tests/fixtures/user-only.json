@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "allow": [
+    {
+      "tool": "Bash",
+      "match": { "command": "^ls(\\s|$)" },
+      "reason": "safe read-only listing"
+    },
+    {
+      "tool": "WebFetch",
+      "match": { "url": "^https?://docs\\.anthropic\\.com/" },
+      "reason": "anthropic docs"
+    }
+  ],
+  "deny": [
+    {
+      "tool": "Bash",
+      "match": { "command": "rm\\s+-rf\\s+/" },
+      "reason": "never rm -rf /"
+    }
+  ]
+}
