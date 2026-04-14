@@ -469,6 +469,9 @@ Atomic write wrapper (`write-rule.sh`):
 
 - [ ] ensure all commits are clean on `main`, working tree has no uncommitted changes.
 - [ ] create GitHub repo via gh CLI: `gh repo create nemirovsky/claude-passthru --public --source=. --description "Regex-based permission rules for Claude Code via PreToolUse hook"`. Prompt user first to confirm `--public` vs `--private`.
+- [ ] + set GitHub topics (tags) via `gh repo edit nemirovsky/claude-passthru --add-topic claude-code --add-topic claude-code-plugin --add-topic claude-code-hook --add-topic permissions --add-topic security --add-topic regex --add-topic developer-tools`. Tags improve discoverability on GitHub topic pages. Confirm the tag list with the user before running; the list above is a starting point and may be adjusted.
+- [ ] + verify description and topics are set: `gh repo view nemirovsky/claude-passthru --json description,repositoryTopics` - confirm both fields are populated as expected. If either is missing, re-run the corresponding `gh repo edit` / `gh repo create` step.
+- [ ] + (optional) set the repo homepage URL if a docs site or marketplace listing URL exists later: `gh repo edit nemirovsky/claude-passthru --homepage "<url>"`. Skip on v0.1.0 since no hosted docs yet.
 - [ ] push `main` to the new remote: `git push -u origin main`.
 - [ ] enable branch protection on `main` via gh CLI (requires admin on the repo):
   ```
