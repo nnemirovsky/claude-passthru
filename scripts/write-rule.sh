@@ -101,8 +101,7 @@ mkdir -p "$TARGET_DIR"
 # contention with no need for two parallel code paths.
 USER_CLAUDE_DIR="${PASSTHRU_USER_HOME:-$HOME}/.claude"
 mkdir -p "$USER_CLAUDE_DIR"
-LOCK_PATH="$USER_CLAUDE_DIR/passthru.write.lock"
-LOCK_DIR="${LOCK_PATH}.d"
+LOCK_DIR="$USER_CLAUDE_DIR/passthru.write.lock.d"
 LOCK_TIMEOUT="${PASSTHRU_WRITE_LOCK_TIMEOUT:-5}"
 
 LOCK_HELD=0
@@ -130,7 +129,7 @@ release_lock() {
 }
 
 if ! acquire_lock; then
-  printf 'write-rule.sh: failed to acquire lock %s within %ss\n' "$LOCK_PATH" "$LOCK_TIMEOUT" >&2
+  printf 'write-rule.sh: failed to acquire lock %s within %ss\n' "$LOCK_DIR" "$LOCK_TIMEOUT" >&2
   exit 1
 fi
 

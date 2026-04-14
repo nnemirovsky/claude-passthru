@@ -43,6 +43,11 @@ fi
 
 VERIFY_SH="${_PASSTHRU_PLUGIN_ROOT}/scripts/verify.sh"
 
+# Pull in PASSTHRU_CANON_JQ (and any other shared constants) so the import-time
+# dedup filter stays in lockstep with verify.sh's canonical identity.
+# shellcheck disable=SC1091
+source "${_PASSTHRU_PLUGIN_ROOT}/hooks/common.sh"
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -290,11 +295,10 @@ convert_settings_file() {
 dedup_rules() {
   # stdin: a JSON array of rules (possibly with duplicates)
   # stdout: a JSON array with first-occurrence kept, original ordering preserved
-  jq '
-    def canon: {tool:(.tool // null), match:(.match // null)}
-               | walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)
-               | tojson;
-    reduce .[] as $r ([[], []];
+  # Uses PASSTHRU_CANON_JQ from common.sh so identity semantics match verify.sh.
+  jq "
+    def canon: ${PASSTHRU_CANON_JQ} | tojson;
+"'    reduce .[] as $r ([[], []];
       (.[0]) as $seen
       | (.[1]) as $out
       | ($r | canon) as $id

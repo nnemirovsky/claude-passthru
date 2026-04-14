@@ -19,6 +19,12 @@ setup() {
 
   export PASSTHRU_USER_HOME="$USER_ROOT"
   export PASSTHRU_PROJECT_DIR="$PROJ_ROOT"
+
+  # Pull in passthru_sha256 so the before/after equality checks use SHA-256
+  # consistently (the older inline fallback mixed shasum defaults, which
+  # degrade to SHA-1 when -a is omitted).
+  # shellcheck disable=SC1090
+  source "$REPO_ROOT/hooks/common.sh"
 }
 
 teardown() {
@@ -191,23 +197,14 @@ run_boot() {
 }
 JSON
   # Stable checksum to compare before/after
-  if command -v shasum >/dev/null 2>&1; then
-    before_sum="$(shasum "$(proj_authored)" | awk '{print $1}')"
-  else
-    before_sum="$(sha1sum "$(proj_authored)" | awk '{print $1}')"
-  fi
+  before_sum="$(passthru_sha256 "$(proj_authored)")"
   # First bootstrap run
   cp "$FIXTURES/settings-with-allow.json" "$PROJ_ROOT/.claude/settings.local.json"
   run_boot --write
   [ "$status" -eq 0 ]
 
   # Capture imported content after first run
-  first_sum=""
-  if command -v shasum >/dev/null 2>&1; then
-    first_sum="$(shasum "$(proj_imported)" | awk '{print $1}')"
-  else
-    first_sum="$(sha1sum "$(proj_imported)" | awk '{print $1}')"
-  fi
+  first_sum="$(passthru_sha256 "$(proj_imported)")"
 
   # Change the settings file and re-run -> imported content changes, authored is still untouched
   printf '{"permissions":{"allow":["Bash(pwd:*)"]}}\n' > "$PROJ_ROOT/.claude/settings.local.json"
@@ -219,11 +216,7 @@ JSON
   [ "$output" = "^pwd(\\s|\$)" ]
 
   # Authored file byte-identical
-  if command -v shasum >/dev/null 2>&1; then
-    after_sum="$(shasum "$(proj_authored)" | awk '{print $1}')"
-  else
-    after_sum="$(sha1sum "$(proj_authored)" | awk '{print $1}')"
-  fi
+  after_sum="$(passthru_sha256 "$(proj_authored)")"
   [ "$before_sum" = "$after_sum" ]
 }
 
@@ -297,11 +290,7 @@ JSON
 }
 JSON
   # Capture pre-bootstrap checksum of imported.
-  if command -v shasum >/dev/null 2>&1; then
-    before_sum="$(shasum "$(proj_imported)" | awk '{print $1}')"
-  else
-    before_sum="$(sha1sum "$(proj_imported)" | awk '{print $1}')"
-  fi
+  before_sum="$(passthru_sha256 "$(proj_imported)")"
 
   # Settings that would import ls as Bash allow -> conflict with the deny.
   printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$PROJ_ROOT/.claude/settings.local.json"
@@ -309,11 +298,7 @@ JSON
   [ "$status" -ne 0 ]
 
   # Imported file should be unchanged (rolled back from backup).
-  if command -v shasum >/dev/null 2>&1; then
-    after_sum="$(shasum "$(proj_imported)" | awk '{print $1}')"
-  else
-    after_sum="$(sha1sum "$(proj_imported)" | awk '{print $1}')"
-  fi
+  after_sum="$(passthru_sha256 "$(proj_imported)")"
   [ "$before_sum" = "$after_sum" ]
 }
 

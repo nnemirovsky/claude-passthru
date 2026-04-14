@@ -325,9 +325,9 @@ done
 # This replaces ~80 lines of bash sort + flush_group + per-file merge loops.
 
 canon_rule() {
-  # stdin rule JSON -> stdout canonical identity string
-  jq -c '{tool:(.tool // null), match:(.match // null)}
-         | walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)'
+  # stdin rule JSON -> stdout canonical identity string.
+  # Uses PASSTHRU_CANON_JQ from common.sh so identity semantics are single-sourced.
+  jq -c "$PASSTHRU_CANON_JQ"
 }
 
 # Build a JSON array of file documents, each with its parsed rules and the
@@ -347,11 +347,9 @@ if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
   #   .duplicates : array of {canon, occurrences:[{file,list,index},...]}
   #                 with len > 1 (group_by(canon))
   #   .merged_allow / .merged_deny : concatenated lists (file order, then index)
-  GROUP_REPORT="$(jq -c '
-    def canon: {tool:(.tool // null), match:(.match // null)}
-               | walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)
-               | tojson;
-    . as $files
+  GROUP_REPORT="$(jq -c "
+    def canon: ${PASSTHRU_CANON_JQ} | tojson;
+"'    . as $files
     | (reduce range(0; $files | length) as $fi
         ([];
           . + ([range(0; ($files[$fi].doc.allow | length)) as $i

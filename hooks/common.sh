@@ -21,6 +21,28 @@
 # This file is sourced, not executed.
 
 # ---------------------------------------------------------------------------
+# Canonical rule identity (jq filter source)
+# ---------------------------------------------------------------------------
+#
+# PASSTHRU_CANON_JQ: a jq program fragment that, when fed a rule JSON document
+# on input, emits that rule's canonical identity. Two rules collide iff their
+# canonical forms are byte-identical. Identity is {tool, match} only: reason
+# and any future cosmetic fields do not participate.
+#
+# Embed it into a jq call as either:
+#   (a) a standalone filter:    jq "$PASSTHRU_CANON_JQ" <<<"$rule"
+#   (b) a local function:       jq "def canon: $PASSTHRU_CANON_JQ | tojson; ..."
+#
+# Form (a) emits a JSON object. Form (b) composes with `| tojson` for a string
+# form suitable for group_by / equality.
+#
+# Keeping the one definition here means verify.sh's dedup-canon logic and
+# bootstrap.sh's import-time dedup logic cannot drift apart: a change to rule
+# identity semantics is a single-line edit.
+PASSTHRU_CANON_JQ='{tool:(.tool // null), match:(.match // null)}
+         | walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)'
+
+# ---------------------------------------------------------------------------
 # Shared environment helpers (used by hook handlers, scripts, and tests)
 # ---------------------------------------------------------------------------
 

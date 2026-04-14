@@ -1,5 +1,5 @@
 {
   "name": "passthru",
   "version": "0.1.0",
-  "description": "Regex-based permission rules for Claude Code via PreToolUse hook. Supplements the native permission system with regex rules that the native glob syntax cannot express."
+  "description": "Regex-based permission rules for Claude Code via PreToolUse and PostToolUse hooks. Supplements the native permission system with regex rules that the native glob syntax cannot express, and audits native permission dialog outcomes."
 }

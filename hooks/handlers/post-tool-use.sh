@@ -53,8 +53,7 @@ fi
 # ---------------------------------------------------------------------------
 # passthru_user_home, passthru_tmpdir, passthru_iso_ts, passthru_sha256,
 # sanitize_tool_use_id, audit_enabled, audit_log_path, emit_passthrough
-# all live in common.sh. Defined here only when not provided by an older
-# common.sh checkout (paranoia for sourced library staleness).
+# all live in common.sh. The handler-specific helpers below build on those.
 
 # write_post_event <event> <tool_name> <tool_use_id>
 # Appends one JSONL line to the audit log. Fail-open (never propagates errors).
@@ -93,8 +92,11 @@ write_post_event() {
 # of the following as "denied":
 #   - tool_response is the literal string "null" (explicit null payload)
 #   - tool_response.permissionDenied is true
-#   - tool_response.error matches a permission/denied/blocked anchored token
-#   - tool_response.status == "denied" or "permission_denied"
+#   - tool_response.error / .errorMessage / .message matches an anchored
+#     permission/access/blocked/denied/not-allowed token (underscore, hyphen,
+#     or space separator variants all accepted)
+#   - tool_response.status or .state equals one of:
+#       "denied", "permission_denied", "permissionDenied", "blocked"
 # Empty / missing tool_response is NOT classified as denied (no signal).
 # Returns 0 when denied, 1 otherwise.
 is_denied_response() {

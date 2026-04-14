@@ -19,6 +19,11 @@ setup() {
   export PASSTHRU_USER_HOME="$USER_ROOT"
   export PASSTHRU_PROJECT_DIR="$PROJ_ROOT"
   export TMPDIR="$BCTMP"
+
+  # Pull in passthru_sha256 (and other helpers) so tests use the same sha
+  # detection as the production handler rather than rolling their own fallback.
+  # shellcheck disable=SC1090
+  source "$REPO_ROOT/hooks/common.sh"
 }
 
 teardown() {
@@ -40,12 +45,9 @@ crumb_path() {
 }
 
 sha256_of() {
-  # Emit sha256 hex of $1. Works on macOS (shasum) and Linux (sha256sum).
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  else
-    sha256sum "$1" | awk '{print $1}'
-  fi
+  # Thin wrapper over passthru_sha256 from common.sh. Kept under the old name
+  # so the in-suite call sites read naturally.
+  passthru_sha256 "$1"
 }
 
 # write_breadcrumb <tool_use_id> <tool> <tool_input_json> <user_sha_or_empty> <proj_sha_or_empty>
