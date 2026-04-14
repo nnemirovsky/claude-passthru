@@ -315,6 +315,47 @@ write_settings() {
   [ "$output" = "asked_allowed_always" ]
 }
 
+@test "WebFetch: URL with ?query on same host still matches WebFetch(domain:...)" {
+  # Regression: a URL like `https://x.com?foo=1` used to leave host="x.com?foo=1"
+  # after the strip, so the entry_matches_call path misclassified the outcome as
+  # asked_allowed_unknown even though the rule covered the host. Stripping ? (and
+  # #) before / and : fixes the host parse.
+  enable_audit
+  write_breadcrumb "tidWQ" "WebFetch" '{"url":"https://x.com?foo=1"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["WebFetch(domain:x.com)"]' '[]'
+  run_handler '{"tool_name":"WebFetch","tool_input":{"url":"https://x.com?foo=1"},"tool_use_id":"tidWQ","tool_response":{"content":"ok"}}'
+  [ "$status" -eq 0 ]
+
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
+@test "WebFetch: URL with #fragment on same host still matches WebFetch(domain:...)" {
+  enable_audit
+  write_breadcrumb "tidWF" "WebFetch" '{"url":"https://x.com#frag"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["WebFetch(domain:x.com)"]' '[]'
+  run_handler '{"tool_name":"WebFetch","tool_input":{"url":"https://x.com#frag"},"tool_use_id":"tidWF","tool_response":{"content":"ok"}}'
+  [ "$status" -eq 0 ]
+
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
+@test "WebFetch: URL with ?query and #fragment on same host still matches WebFetch(domain:...)" {
+  # Double-strip: both ? and # appear. Must distill to the bare host.
+  enable_audit
+  write_breadcrumb "tidWQF" "WebFetch" '{"url":"https://x.com/path?foo=1#frag"}' "" ""
+  write_settings "$USER_ROOT/.claude/settings.json" '["WebFetch(domain:x.com)"]' '[]'
+  run_handler '{"tool_name":"WebFetch","tool_input":{"url":"https://x.com/path?foo=1#frag"},"tool_use_id":"tidWQF","tool_response":{"content":"ok"}}'
+  [ "$status" -eq 0 ]
+
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "asked_allowed_always" ]
+}
+
 # ---------------------------------------------------------------------------
 # is_denied_response: regression / false-positive surface
 # ---------------------------------------------------------------------------

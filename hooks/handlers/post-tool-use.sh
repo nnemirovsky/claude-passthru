@@ -236,7 +236,13 @@ entry_matches_call() {
       local url host
       url="$(jq -r '.url // ""' <<<"$tool_input" 2>/dev/null || echo '')"
       [ -z "$url" ] && return 1
+      # Peel off the pieces in RFC 3986 order so a same-host URL that carries
+      # `?query` or `#fragment` (or both) still distills to a clean hostname.
+      # Earlier strips of `/` and `:` missed these tails, so
+      # `https://x.com?a=1` produced host="x.com?a=1" and failed equality.
       host="${url#*://}"
+      host="${host%%\#*}"
+      host="${host%%\?*}"
       host="${host%%/*}"
       host="${host%%:*}"
       [ -z "$host" ] && return 1

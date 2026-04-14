@@ -377,3 +377,73 @@ SH
   run jq -e '.version == 1 and (.allow | length == 0) and (.deny | length == 0)' "$(user_file)"
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Same-filesystem atomic rename guarantee: BACKUP and TMPOUT must live in
+# TARGET's directory so that `mv` is a rename(2) within one filesystem, not
+# a copy+unlink across volumes. Without this, the atomic-write claim in the
+# script header is false on any host where $HOME and the system temp dir
+# live on different volumes (tmpfs on Linux, external $HOME on macOS).
+# ---------------------------------------------------------------------------
+@test "write-rule: BACKUP created in TARGET's directory, not system tmp" {
+  # Strategy: instrument a copy of write-rule.sh to record where BACKUP and
+  # TMPOUT get created, then inspect the recorded paths. This dodges timing
+  # races entirely; the assertion is about the path variables, not a
+  # filesystem scan during a brief window.
+  FAKE_ROOT="$TMP/fake-plugin-root-loc"
+  mkdir -p "$FAKE_ROOT/hooks" "$FAKE_ROOT/scripts"
+  cp "$REPO_ROOT/hooks/common.sh" "$FAKE_ROOT/hooks/common.sh"
+  cat > "$FAKE_ROOT/scripts/verify.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$FAKE_ROOT/scripts/verify.sh"
+
+  RECORD="$TMP/tempfile-paths.log"
+  INSTR_WRITE="$TMP/write-rule-instr-loc.sh"
+  # After BACKUP/TMPOUT are assigned, log their values so the test can
+  # inspect them independently of file lifetime.
+  awk -v rec="$RECORD" '
+    /^STATE="BACKED_UP"$/ { printf "printf '\''BACKUP=%%s\\n'\'' \"$BACKUP\" >> %s\n", rec; print; next }
+    /^STATE="WRITING"$/   { printf "printf '\''TMPOUT=%%s\\n'\'' \"$TMPOUT\" >> %s\n", rec; print; next }
+    { print }
+  ' "$WRITE" > "$INSTR_WRITE"
+  chmod +x "$INSTR_WRITE"
+
+  # Seed a baseline so we exercise the "TARGET already exists" path.
+  cat > "$(user_file)" <<'EOF'
+{"version":1,"allow":[],"deny":[]}
+EOF
+
+  CLAUDE_PLUGIN_ROOT="$FAKE_ROOT" \
+    bash "$INSTR_WRITE" user allow '{"tool":"Bash","match":{"command":"^ls"}}'
+  [ "$?" -eq 0 ]
+
+  [ -f "$RECORD" ]
+  TARGET_DIR="$(dirname "$(user_file)")"
+  backup_path="$(grep '^BACKUP=' "$RECORD" | cut -d= -f2-)"
+  tmpout_path="$(grep '^TMPOUT=' "$RECORD" | cut -d= -f2-)"
+
+  [ -n "$backup_path" ]
+  [ -n "$tmpout_path" ]
+
+  # Both must live directly under TARGET's parent. That is the only property
+  # the atomic-rename guarantee actually needs; it is also the property that
+  # failed under `mktemp -t`, which places the file under whatever the system
+  # temp dir is (potentially a different filesystem).
+  backup_dir="$(dirname "$backup_path")"
+  tmpout_dir="$(dirname "$tmpout_path")"
+  [ "$backup_dir" = "$TARGET_DIR" ]
+  [ "$tmpout_dir" = "$TARGET_DIR" ]
+
+  # Filename shape should match the new mktemp templates so future reviewers
+  # can see at a glance these are claude-passthru temp files.
+  case "$(basename "$backup_path")" in
+    passthru.json.backup.*) ;;
+    *) false ;;
+  esac
+  case "$(basename "$tmpout_path")" in
+    passthru.json.tmp.*) ;;
+    *) false ;;
+  esac
+}

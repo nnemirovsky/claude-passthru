@@ -180,7 +180,13 @@ if ! jq -e '.' "$TARGET" >/dev/null 2>&1; then
   exit 1
 fi
 
-BACKUP="$(mktemp -t passthru-write.XXXXXX)"
+# Create BACKUP in the same directory as TARGET so the eventual `mv BACKUP
+# TARGET` rollback is truly atomic (rename(2) is only atomic within a single
+# filesystem; `mktemp -t` falls back to the system temp dir, which on many
+# setups is a different volume -- tmpfs on Linux, /var/folders/... vs an
+# external $HOME on macOS). Placing it next to TARGET guarantees rename-level
+# atomicity and avoids the silent copy+unlink degradation.
+BACKUP="$(mktemp "${TARGET}.backup.XXXXXX")"
 cp -p "$TARGET" "$BACKUP"
 STATE="BACKED_UP"
 
@@ -205,7 +211,9 @@ NEW_CONTENT="$(
 
 # Write atomically via mv-over. After this `mv`, TARGET holds unverified
 # content; the cleanup trap uses STATE to roll back on signal-based exits.
-TMPOUT="$(mktemp -t passthru-write-out.XXXXXX)"
+# TMPOUT must live next to TARGET for the rename to be a true atomic
+# same-filesystem operation (see the BACKUP placement note above).
+TMPOUT="$(mktemp "${TARGET}.tmp.XXXXXX")"
 printf '%s\n' "$NEW_CONTENT" > "$TMPOUT"
 STATE="WRITING"
 mv "$TMPOUT" "$TARGET"
