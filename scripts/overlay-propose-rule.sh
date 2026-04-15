@@ -36,18 +36,31 @@ if [ -z "$TOOL_NAME" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Regex-escape a literal for use inside a PCRE. We only need `.` (common in
-# hosts + file paths) escaped. Other metachars are handled implicitly because
-# we either anchor to `^` or rely on the categories themselves controlling
-# what follows. Keep the escape list minimal to avoid over-escaping useful
-# patterns like `-` in hostnames.
+# Regex-escape a literal for use inside a PCRE. Escape every character that
+# carries metasyntactic meaning: \ . + ? * ( ) [ ] { } | ^ $. A hostname with
+# `+` or a path containing `[bar]` would otherwise either fail to compile or
+# silently mismatch (e.g. `[bar]` as a character class matches only a/b/r).
+#
+# Implementation note: we shell out to `sed` because bash parameter expansion
+# cannot handle literal `}` in the replacement (the parser closes the
+# substitution at the first unescaped `}`). Using sed keeps the escape list
+# honest and easy to audit. Two slashes + a single dollar sign delimiter
+# avoid collisions with any of the characters we escape.
 escape_regex() {
-  local s="$1"
-  # Escape dot and backslash only. The host/path content we emit is not
-  # expected to contain regex meta beyond that in the common path.
-  s="${s//\\/\\\\}"
-  s="${s//./\\.}"
-  printf '%s' "$s"
+  LC_ALL=C sed -e 's/\\/\\\\/g' \
+               -e 's/\./\\./g' \
+               -e 's/+/\\+/g' \
+               -e 's/?/\\?/g' \
+               -e 's/\*/\\*/g' \
+               -e 's/(/\\(/g' \
+               -e 's/)/\\)/g' \
+               -e 's/\[/\\[/g' \
+               -e 's/\]/\\]/g' \
+               -e 's/{/\\{/g' \
+               -e 's/}/\\}/g' \
+               -e 's/|/\\|/g' \
+               -e 's/\^/\\^/g' \
+               -e 's/\$/\\$/g' <<<"$1"
 }
 
 emit_fallback() {

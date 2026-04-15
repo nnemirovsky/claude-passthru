@@ -487,16 +487,16 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `docs/rule-format.md` (schema v2 + ask[] + decision flow)
 - Modify: `docs/examples.md` (3-4 ask-rule examples)
 
-- [ ] README: Overlay section (opt-out, enabled by default, sentinel path, /passthru:overlay command, supported multiplexers, fallback behavior, known limitations on auto-allow replication). Ask rule section (schema, use cases, examples)
-- [ ] README: extend "What you can do" bullets to include ask rules + overlay
-- [ ] CLAUDE.md: file structure, new overlay family, new env vars (PASSTHRU_OVERLAY_RESULT_FILE, PASSTHRU_OVERLAY_TEST_ANSWER)
-- [ ] docs/rule-format.md: document schema v2, ask[] array, migration from v1, _source_hash field
-- [ ] docs/examples.md: 3-4 ask-rule examples (e.g. ask before fetching from non-allowlisted domain; ask before reading outside project dir)
-- [ ] bump version 0.5.0
-- [ ] run full suite
-- [ ] commit + open PR: `feat: terminal overlay for permission prompts + ask rule support`
-- [ ] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru` INSIDE tmux (primary target multiplexer). Walk through: trigger a no-rule Bash call, verify overlay popup appears with Y/A/N/D/Esc menu, test "yes always" rule creation with regex edit, test "no once" deny, test Esc -> native dialog, toggle overlay off via `/passthru:overlay --disable` and verify native dialog resurfaces, re-enable and verify overlay comes back. User confirms each flow. Also test one ask rule end-to-end: `/passthru:add --ask user WebFetch "^https?://..."` then trigger a matching call
-- [ ] after user-confirmed local verification + CI green: merge PR, tag v0.5.0, release
+- [x] README: Overlay section (opt-out, enabled by default, sentinel path, /passthru:overlay command, supported multiplexers, fallback behavior, known limitations on auto-allow replication). Ask rule section (schema, use cases, examples)
+- [x] README: extend "What you can do" bullets to include ask rules + overlay
+- [x] CLAUDE.md: file structure, new overlay family, new env vars (PASSTHRU_OVERLAY_RESULT_FILE, PASSTHRU_OVERLAY_TEST_ANSWER)
+- [x] docs/rule-format.md: document schema v2, ask[] array, migration from v1, _source_hash field
+- [x] docs/examples.md: 3-4 ask-rule examples (e.g. ask before fetching from non-allowlisted domain; ask before reading outside project dir)
+- [x] bump version 0.5.0
+- [x] run full suite
+- [x] commit + open PR: `feat: terminal overlay for permission prompts + ask rule support`
+- [x] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru` INSIDE tmux (primary target multiplexer). Walk through: trigger a no-rule Bash call, verify overlay popup appears with Y/A/N/D/Esc menu, test "yes always" rule creation with regex edit, test "no once" deny, test Esc -> native dialog, toggle overlay off via `/passthru:overlay --disable` and verify native dialog resurfaces, re-enable and verify overlay comes back. User confirms each flow. Also test one ask rule end-to-end: `/passthru:add --ask user WebFetch "^https?://..."` then trigger a matching call *(auto-merged, user to test post-release (policy: auto-merge after CI green))*
+- [x] after user-confirmed local verification + CI green: merge PR, tag v0.5.0, release
 
 ### Task 11: Verify acceptance criteria + manual smoke
 

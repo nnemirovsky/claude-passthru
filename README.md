@@ -33,9 +33,11 @@ More examples: shape-matching a `gh api` endpoint across any owner/repo pair, al
 * **Shape-aware path and URL rules.** Match on the structure of a path or URL (e.g. `^gh api /repos/[^/]+/[^/]+/forks`) so you pin the endpoint, not the owner.
 * **MCP tool namespaces.** Allow a whole MCP server family with a single tool-regex rule, no need to enumerate every tool.
 * **Deny lists that win.** A matching deny rule unconditionally overrides any allow, so you can cement safety rules on top of a permissive allow set.
+* **Ask rules that route to the overlay (or native dialog as fallback).** Mark a tool shape as "always prompt me" via `ask[]`. Routes to the passthru overlay when enabled, falls back to Claude Code's native dialog otherwise.
+* **Terminal overlay for permission prompts with Y/A/N/D keyboard flow.** Inline TUI popup inside your tmux / kitty / wezterm session that intercepts permission prompts. Single-keystroke yes-once / yes-always / no-once / no-always. Escape drops through to the native dialog.
 * **Opt-in audit log.** JSONL record of every decision (including what the native dialog did for passthroughs). Off by default, zero overhead when disabled.
 * **Standalone verifier.** Validate every rule file from the command line or via `/passthru:verify` to catch bad JSON, invalid regex, and allow/deny conflicts before they silently disable rules.
-* **First-run bootstrap.** One-shot `/passthru:bootstrap` command (or `scripts/bootstrap.sh` for scripting) that converts existing native `permissions.allow` entries into passthru rules. A one-time `SessionStart` hint points at it when there are importable entries.
+* **First-run bootstrap.** One-shot `/passthru:bootstrap` command (or `scripts/bootstrap.sh` for scripting) that converts existing native `permissions.allow` entries into passthru rules. A `SessionStart` hint fires whenever `settings.json` has importable entries that are not yet in `passthru.imported.json` and auto-silences after the next bootstrap run.
 
 ## Commands
 
@@ -44,12 +46,13 @@ All commands are plugin-namespaced under `/passthru:`.
 | Command | What it does |
 | --- | --- |
 | `/passthru:bootstrap` | One-shot importer: reviews your existing `permissions.allow` entries, shows the proposed rules, asks to confirm, then writes `passthru.imported.json`. Runs the verifier afterwards. |
-| `/passthru:add` | Add a rule without hand-editing `passthru.json`. Supports `--deny` and `--field`. |
+| `/passthru:add` | Add a rule without hand-editing `passthru.json`. Supports `--allow` (default), `--ask`, `--deny`, and `--field`. |
 | `/passthru:suggest` | Propose a generalized rule from a recent tool call in the conversation, then write it on confirmation. |
 | `/passthru:list` | Show every rule across user and project scopes, grouped by `(scope, list, source)` with 1-based indexes. Filter by `--scope`, `--list`, `--source`, or `--tool`. |
 | `/passthru:remove` | Remove an authored rule by `<scope> <list> <index>`. Indexes match the numbering from `/passthru:list`. Imported (bootstrap-generated) rules are not removable here; edit `settings.json` and re-run bootstrap instead. |
 | `/passthru:verify` | Validate every rule file. Surfaces parse errors, schema violations, invalid regex, duplicates, and allow/deny conflicts. |
 | `/passthru:log` | Read the audit log with filters. Also toggles the audit sentinel on/off. |
+| `/passthru:overlay` | Toggle the permission-prompt overlay on or off. `--status` also reports which multiplexer the hook detects. |
 
 Full reference in the [Command reference](#command-reference) section below.
 
@@ -133,7 +136,7 @@ Bootstrap writes to dedicated imported files so hand-curated rules in `passthru.
 
 Re-running bootstrap overwrites the imported files. Edit `passthru.json` (the authored file) for hand-managed rules. Both files are merged at hook time.
 
-**One-time session hint.** The plugin also ships a `SessionStart` hook that detects when you have importable `permissions.allow` entries but no passthru rule files yet. On the first such session it prints a single-line hint to stderr pointing at `/passthru:bootstrap`, then records a marker at `~/.claude/passthru.bootstrap-hint-shown` so the hint never fires again. Delete that marker file to re-enable the hint.
+**SessionStart hint.** The plugin ships a `SessionStart` hook that detects importable `permissions.allow` entries in `settings.json` that are not yet covered by a rule in `passthru.imported.json`. Each imported rule carries a `_source_hash` field recording which settings entry it came from, so the hint compares the two hash sets on every session start. The hint fires until the last un-imported entry is covered, then auto-silences. Run `/passthru:bootstrap` once and it will not fire again unless you add new native entries later.
 
 ## Rule format reference
 
@@ -141,11 +144,14 @@ Rule files are JSON with the shape:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "allow": [ { "tool": "...", "match": { "...": "..." }, "reason": "..." } ],
-  "deny":  [ { "tool": "...", "match": { "...": "..." }, "reason": "..." } ]
+  "deny":  [ { "tool": "...", "match": { "...": "..." }, "reason": "..." } ],
+  "ask":   [ { "tool": "...", "match": { "...": "..." }, "reason": "..." } ]
 }
 ```
+
+`version: 1` files (no `ask[]` key) continue to load unchanged. `ask[]` is v2-only. See [Ask rules](#ask-rules) below for when to use it.
 
 Four examples covering common use cases.
 
@@ -239,6 +245,107 @@ Read the audit log in a filtered table (see [Audit log](#audit-log) below). Also
 /passthru:log --enable
 ```
 
+### `/passthru:overlay`
+
+Toggle the in-terminal permission-prompt overlay (see [Overlay](#overlay) below), or inspect its current state plus multiplexer detection.
+
+```
+/passthru:overlay --status
+/passthru:overlay --disable
+/passthru:overlay --enable
+```
+
+`--status` prints the current enabled/disabled state, the sentinel path, and whether a supported multiplexer (tmux, kitty, wezterm) is detected and runnable on PATH.
+
+## Overlay
+
+The overlay is an in-terminal TUI popup that intercepts permission prompts before they reach Claude Code's native dialog. When the overlay fires you see a single-keystroke menu:
+
+```
+Passthru Permission Prompt
+
+Tool:   Bash
+Input:  gh api /repos/anthropics/claude-code/forks?page=2
+
+[Y] Yes, once
+[A] Yes, always (write rule)
+[N] No, once
+[D] No, always (deny rule)
+[Esc] Skip (use native dialog)
+```
+
+Picking `A` or `D` drops you into a second screen where you can accept or hand-edit the proposed regex before the rule is written to `passthru.json`.
+
+**On by default.** The overlay is enabled out of the box on every supported multiplexer. No configuration needed.
+
+**Opt-out.** Drop the overlay with `/passthru:overlay --disable` (or `touch ~/.claude/passthru.overlay.disabled`). Passthru will emit `permissionDecision: "ask"` instead, Claude Code shows its built-in dialog, and you still get the same yes-once / yes-always / no-once / no-always outcomes via the native UI. Re-enable with `/passthru:overlay --enable`.
+
+**Sentinel path.** `~/.claude/passthru.overlay.disabled`. Absent = overlay enabled, present = overlay disabled. The `/passthru:overlay` command is a thin wrapper around this file.
+
+**Supported multiplexers.**
+
+| Multiplexer | Detection env var | Popup command used |
+| --- | --- | --- |
+| tmux | `$TMUX` | `tmux display-popup -E -w 80% -h 60%` |
+| kitty | `$KITTY_WINDOW_ID` | `kitty @ launch --type=overlay` |
+| wezterm | `$WEZTERM_PANE` | `wezterm cli split-pane` (adjacent pane) |
+
+The hook picks the first detected multiplexer whose binary is also on `$PATH`. If none match, the hook falls through to Claude Code's native dialog.
+
+**When the overlay fires.** The hook runs the normal decision pipeline first. The overlay only fires when nothing else matched:
+
+1. `deny` rule match -> immediate deny, no overlay.
+2. `allow` rule match -> immediate allow, no overlay.
+3. `ask` rule match -> overlay (or native dialog as fallback). An ask-rule match wins over the permission-mode auto-allow shortcut below, because ask expresses explicit "prompt me" intent.
+4. No rule match -> check Claude Code's `permission_mode` auto-allow rules: `bypassPermissions` (everything), `acceptEdits` + Write/Edit within cwd, `default` + read tools (Read, Grep, Glob, NotebookRead, LS) within cwd, `plan` + read tools. If Claude Code would auto-allow, the hook lets the call through without prompting. Otherwise, overlay.
+
+**Known limitations.**
+
+* The mode-based auto-allow replication is best-effort and errs on the conservative side. Claude Code resolves symlinks (`realpathSync`) and honors `additionalAllowedWorkingDirs`, sandbox allowlists, and internal-path predicates. The hook uses literal `$CWD/` prefix match and explicitly rejects `/../` traversal. Net effect: some calls Claude Code would auto-allow fall through to the overlay anyway (extra prompt, safe direction). No false auto-allows across the other direction.
+* The overlay relies on your terminal multiplexer's popup API. In screen or plain bash without any multiplexer the hook falls through to the native dialog every time. That is fine. The overlay is a UX layer, not a policy layer.
+* Each overlay prompt has a 60-second timeout (`PASSTHRU_OVERLAY_TIMEOUT`, configurable). If you leave the popup idle for longer, the hook treats the prompt as cancelled and hands off to the native dialog.
+
+## Ask rules
+
+`ask[]` is a third rule list, alongside `allow[]` and `deny[]`, that explicitly routes a matching tool call to a prompt. Use ask when you want to be asked, not when you want to auto-allow or auto-deny.
+
+**Schema.** Ask rules live on v2 files:
+
+```json
+{
+  "version": 2,
+  "ask": [
+    { "tool": "WebFetch", "match": { "url": "^https?://internal\\." }, "reason": "prompt for internal urls" }
+  ]
+}
+```
+
+The rule shape is identical to allow/deny. Only the list name changes. See [`docs/rule-format.md`](docs/rule-format.md) for the full schema.
+
+**When a match fires.** The hook signals "ask the user". With the overlay enabled (and a supported multiplexer available), the overlay dialog pops up. With the overlay disabled or the multiplexer absent, the hook emits `permissionDecision: "ask"` and Claude Code shows its native dialog. Either way the call is paused until you decide.
+
+**Three common use cases.**
+
+1. **Prompt before fetching from non-allowlisted domains.** You have a blanket `WebFetch` allow, but a few domains you always want to eyeball:
+
+   ```
+   /passthru:add --ask user WebFetch "^https?://(?!example\\.com)" "prompt for non-example-domain URLs"
+   ```
+
+2. **Prompt before reading outside the project directory.** Narrow allow for your workspace paths paired with an ask rule that catches anything outside:
+
+   ```
+   /passthru:add --ask user Read "^/Users/.*/\\.ssh" "prompt before reading anything under .ssh"
+   ```
+
+3. **Prompt before MCP calls from untrusted servers.** You trust `mcp__gemini-cli__*` outright but want to audit calls to a half-trusted MCP server:
+
+   ```
+   /passthru:add --ask user '^mcp__untrusted__' "prompt on all calls to the untrusted MCP server"
+   ```
+
+**Decision order with allow + ask.** `deny` wins globally. Between `allow` and `ask`, document order within the merged list decides: a narrow `allow: Bash(git)` declared before a broader `ask: Bash(.*)` wins over the ask, and a narrow `ask: Bash(git push)` declared before a broader `allow: Bash(.*)` wins over the allow. Both are "this call is OK to consider" signals, so you get to pick the ordering in the file. See [`docs/rule-format.md`](docs/rule-format.md) for the full semantics.
+
 ## Verifier standalone
 
 The verifier can be run without Claude Code attached:
@@ -317,10 +424,16 @@ or
 
 **Event types.** From the `PreToolUse` hook:
 
-* `allow` - a passthru allow rule matched.
-* `deny` - a passthru deny rule matched.
-* `ask` - a passthru ask rule matched. The hook emits `permissionDecision: "ask"` to surface the native permission dialog (the overlay path planned for a later release will replace this with an inline TUI popup).
-* `passthrough` - no passthru rule matched. Control passed to the native permission system.
+* `allow` - a passthru allow rule matched, or the overlay returned `yes_once`/`yes_always`.
+* `deny` - a passthru deny rule matched, or the overlay returned `no_once`/`no_always`.
+* `ask` - the hook emitted `permissionDecision: "ask"` (ask rule matched + overlay disabled or unavailable, overlay launch failed, overlay cancelled, or unknown verdict). Claude Code's native dialog handles the prompt; `PostToolUse` classifies the outcome into an `asked_*` event.
+* `passthrough` - no rule matched. The call was passed through to the native permission system, or mode auto-allow handled it.
+
+Each log line also carries a `source` field that attributes the decision:
+
+* `passthru` (default) - rule-driven decision or plugin self-allow.
+* `overlay` - the overlay dialog emitted the verdict (`yes_once`, `no_once`, `yes_always`, `no_always`).
+* `passthru-mode` - permission-mode auto-allow short-circuit (`bypassPermissions`, `acceptEdits` inside cwd, `default` + read tool inside cwd, `plan` + read tool).
 
 From the `PostToolUse` hook, classifying what the native dialog decided for a passthrough:
 

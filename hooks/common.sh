@@ -366,12 +366,35 @@ overlay_available() {
 #                     in acceptEdits return 1.
 #   default (+ empty mode value): 0 for read-only tools
 #                     (Read/Grep/Glob/NotebookRead/LS) when the target path
-#                     is inside cwd, plus WebFetch/WebSearch (CC auto-allows
-#                     these without a path check). Everything else returns 1.
+#                     is inside cwd. Everything else returns 1, including
+#                     WebFetch/WebSearch (user is prompted via the overlay
+#                     or native dialog; `ask[]` rules can opt specific hosts
+#                     in).
 #   plan:             0 for Read/Grep/Glob/NotebookRead/LS (read-only,
 #                     mutating tools are blocked by plan mode anyway). 1
 #                     for any mutating tool.
 #   Unknown mode:     1 (fail-safe: run the overlay).
+# _pm_path_inside_cwd: return 0 when path is literally inside cwd and free of
+# ../ traversal. We do NOT canonicalize paths, so a symlink inside cwd
+# pointing outside cwd still passes - documented as a known limitation.
+#
+# Hoisted out of permission_mode_auto_allows so it is defined once per shell
+# rather than re-defined on every tool call.
+_pm_path_inside_cwd() {
+  local p="$1" c="$2"
+  [ -z "$p" ] && return 1
+  [ -z "$c" ] && return 1
+  # Reject `..` traversal anywhere in the path (including the middle).
+  case "$p" in
+    *'/../'*|*'/..') return 1 ;;
+  esac
+  # Literal prefix check: path must start with "$cwd/" (not just "$cwd").
+  case "$p" in
+    "$c"/*) return 0 ;;
+  esac
+  return 1
+}
+
 permission_mode_auto_allows() {
   local mode="$1" tool_name="$2" tool_input="$3" cwd="$4"
 
@@ -382,24 +405,6 @@ permission_mode_auto_allows() {
 
   # Empty string / unset mode is treated as "default".
   [ -z "$mode" ] && mode="default"
-
-  # Helper: return 0 when path is literally inside cwd and free of ../
-  # traversal. We do NOT canonicalize paths, so a symlink inside cwd
-  # pointing outside cwd still passes - documented as a known limitation.
-  _pm_path_inside_cwd() {
-    local p="$1" c="$2"
-    [ -z "$p" ] && return 1
-    [ -z "$c" ] && return 1
-    # Reject `..` traversal anywhere in the path (including the middle).
-    case "$p" in
-      *'/../'*|*'/..') return 1 ;;
-    esac
-    # Literal prefix check: path must start with "$cwd/" (not just "$cwd").
-    case "$p" in
-      "$c"/*) return 0 ;;
-    esac
-    return 1
-  }
 
   case "$mode" in
     acceptEdits)
@@ -438,10 +443,6 @@ permission_mode_auto_allows() {
             return 0
           fi
           return 1
-          ;;
-        WebFetch|WebSearch)
-          # CC auto-allows these in default mode (no path check).
-          return 0
           ;;
         *)
           return 1
@@ -857,7 +858,7 @@ load_rules() {
   # Merge: concat allow[], deny[], and ask[] across all inputs, preserve order.
   # If no files at all, emit empty skeleton.
   if [ "$idx" -eq 0 ]; then
-    printf '{"version":2,"allow":[],"deny":[],"ask":[]}\n'
+    printf '{"version":2,"allow":[],"ask":[],"deny":[]}\n'
     return 0
   fi
 

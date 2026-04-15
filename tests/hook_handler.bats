@@ -348,8 +348,10 @@ EOF
 @test "audit enabled: no-match -> ask event (overlay unavailable fallback) with tool_use_id" {
   # Post-Task-8: no rule match + default mode + Bash (not auto-allowed) +
   # no multiplexer in test env -> overlay fallback emits ask. Audit log
-  # records event=ask (not passthrough) and NO breadcrumb (ask is a final
-  # decision, no follow-up PostToolUse classification needed).
+  # records event=ask and ALSO writes a breadcrumb so post-tool-use.sh can
+  # classify the native-dialog outcome into an asked_* event. (Pre-fix the
+  # breadcrumb was missing on every ask-emit path; see docs/rule-format.md:169
+  # for the behavior contract.)
   place "$USER_ROOT/.claude/passthru.json" "user-only.json"
   enable_audit
   run_handler '{"tool_name":"Bash","tool_input":{"command":"unknown xyz"},"tool_use_id":"tPT"}'
@@ -360,9 +362,8 @@ EOF
   [ "$output" = "ask" ]
   run jq -r '.tool_use_id' <<<"$line"
   [ "$output" = "tPT" ]
-  # No breadcrumb - ask is a terminal decision.
-  run bash -c "ls '$TMPDIR'/passthru-pre-*.json 2>/dev/null"
-  [ -z "$output" ]
+  # Breadcrumb MUST exist so PostToolUse can classify the native-dialog answer.
+  [ -f "$TMPDIR/passthru-pre-tPT.json" ]
 }
 
 @test "audit enabled: no-match without tool_use_id writes JSONL ask event" {
@@ -1028,6 +1029,38 @@ run_handler_in_stub_root() {
   [ "$decision" = "deny" ]
 }
 
+# Default-mode: WebFetch and WebSearch are NOT auto-allowed ------------------
+# Plan docs/plans/20260415-overlay-and-ask-support.md:237-239 specifies
+# default + Read within cwd as the only auto-allow in default mode. WebFetch
+# and WebSearch must fall through to the overlay so an `ask[]` rule can gate
+# specific hosts.
+
+@test "mode: default + WebFetch -> overlay path entered (NOT auto-allowed)" {
+  setup_overlay_stub "no_once"
+  ti='{"url":"https://example.com"}'
+  payload="$(make_mode_payload 'WebFetch' "$ti" 'default' "$PROJ_ROOT")"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
+  [ -n "$json_line" ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
+  # Overlay returned no_once, hook emits deny. The point: we did NOT pass
+  # through (which would have been the pre-fix auto-allow behavior).
+  [ "$decision" = "deny" ]
+}
+
+@test "mode: default + WebSearch -> overlay path entered (NOT auto-allowed)" {
+  setup_overlay_stub "no_once"
+  ti='{"query":"what is claude code"}'
+  payload="$(make_mode_payload 'WebSearch' "$ti" 'default' "$PROJ_ROOT")"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
+  [ -n "$json_line" ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
+  [ "$decision" = "deny" ]
+}
+
 # Path-traversal safety ------------------------------------------------------
 
 @test "mode: acceptEdits + file_path with ../ traversal is NOT auto-allowed" {
@@ -1392,4 +1425,161 @@ EOF
   run jq -r '.event' <<<"$line"
   [ "$output" = "passthrough" ]
   [ ! -e "$TMP/overlay-stub-RAN" ]
+}
+
+# Breadcrumb on ask-emit paths ---------------------------------------------
+# Every ask-emit path in the hook must drop a breadcrumb in $TMPDIR so the
+# PostToolUse handler can classify the native-dialog outcome. Pre-fix these
+# paths no-op'd and docs/rule-format.md:169 promised classification the hook
+# was not delivering. Each test asserts the breadcrumb file exists after the
+# hook returns.
+
+@test "breadcrumb: overlay-disabled ask path drops a breadcrumb" {
+  enable_audit
+  setup_overlay_refuses_invocation
+  touch "$USER_ROOT/.claude/passthru.overlay.disabled"
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tOVD"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  [ -f "$TMPDIR/passthru-pre-tOVD.json" ]
+}
+
+@test "breadcrumb: overlay-unavailable ask path drops a breadcrumb" {
+  enable_audit
+  setup_overlay_refuses_invocation
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tOVU"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  [ -f "$TMPDIR/passthru-pre-tOVU.json" ]
+}
+
+@test "breadcrumb: overlay-launch-failure ask path drops a breadcrumb" {
+  enable_audit
+  setup_overlay_stub "ignored" 1
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tOVL"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  [ -f "$TMPDIR/passthru-pre-tOVL.json" ]
+}
+
+@test "breadcrumb: overlay-cancel ask path drops a breadcrumb" {
+  enable_audit
+  setup_overlay_stub "cancel"
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tOVC"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  [ -f "$TMPDIR/passthru-pre-tOVC.json" ]
+}
+
+@test "breadcrumb: overlay unknown verdict ask path drops a breadcrumb" {
+  enable_audit
+  # Stub writes a verdict we do not recognize so the *) branch fires.
+  setup_overlay_stub "banana"
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tOVK"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  [ -f "$TMPDIR/passthru-pre-tOVK.json" ]
+}
+
+@test "breadcrumb: overlay-script-missing ask path drops a breadcrumb" {
+  # Covers the (!-f OVERLAY_SH) branch. Build a stub plugin root (same as the
+  # other overlay tests) then delete the overlay.sh so the handler hits the
+  # missing-script fallback instead of running the stub. Multiplexer env is
+  # still arranged by setup_overlay_stub so overlay_available returns true.
+  enable_audit
+  setup_overlay_stub "ignored"
+  rm -f "$CLAUDE_PLUGIN_ROOT/scripts/overlay.sh"
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tOVM"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  # Stderr warning confirms we went through the missing-script branch.
+  [[ "$output" == *"overlay script not found"* ]]
+  # Breadcrumb must exist for PostToolUse classification coverage parity.
+  [ -f "$TMPDIR/passthru-pre-tOVM.json" ]
+  # Audit line carries the "overlay script missing" tag (no ask rule matched).
+  line="$(head -n1 "$(audit_log)")"
+  [ "$(jq -r '.event' <<<"$line")" = "ask" ]
+  [ "$(jq -r '.reason' <<<"$line")" = "overlay script missing" ]
+  [ "$(jq -r '.rule_index' <<<"$line")" = "null" ]
+  [ "$(jq -r '.pattern' <<<"$line")" = "null" ]
+}
+
+@test "unknown verdict: ask-rule match preserves rule metadata in audit line" {
+  # Regression pin for the emit_ask_fallback helper. When MATCHED=ask, every
+  # fallback branch (including the unknown-verdict *) branch) must log the
+  # matched rule's reason / rule_index / pattern, not a generic diagnostic
+  # tag. Before the helper, the *) branch hardcoded "overlay unknown verdict"
+  # and dropped the rule metadata.
+  enable_audit
+  # Plant a user-scope ask rule the payload will match.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "confirm gh" }
+  ],
+  "deny": []
+}
+EOF
+  # Stub writes a verdict we do not recognize so the *) branch fires.
+  setup_overlay_stub "banana"
+  ti='{"command":"gh api /repos/a/b"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tUVASK"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  # Audit line must carry the rule's reason and a concrete (non-null) rule_index
+  # and pattern, NOT the "overlay unknown verdict" tag.
+  line="$(head -n1 "$(audit_log)")"
+  [ "$(jq -r '.event' <<<"$line")" = "ask" ]
+  [ "$(jq -r '.reason' <<<"$line")" = "confirm gh" ]
+  [ "$(jq -r '.rule_index | type' <<<"$line")" = "number" ]
+  pat="$(jq -r '.pattern' <<<"$line")"
+  [ "$pat" != "null" ]
+  [ -n "$pat" ]
+  # And of course the breadcrumb still drops so PostToolUse can classify.
+  [ -f "$TMPDIR/passthru-pre-tUVASK.json" ]
+}
+
+@test "chain: overlay-cancel + PostToolUse success -> asked_allowed_once" {
+  # Full round-trip. Pre-tool-use emits ask and drops a breadcrumb. Post-tool-use
+  # reads the crumb + tool_response and classifies the outcome. A successful
+  # tool_response (no denial error string) with an unchanged settings.json
+  # sha maps to asked_allowed_once via classify_passthrough_outcome.
+  enable_audit
+  setup_overlay_stub "cancel"
+  ti='{"command":"ls"}'
+  payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'default' --arg c "$PROJ_ROOT" \
+    '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tCHAIN"}')"
+  run_handler_in_stub_root "$payload"
+  [ "$status" -eq 0 ]
+  # Breadcrumb must exist for PostToolUse to do anything.
+  [ -f "$TMPDIR/passthru-pre-tCHAIN.json" ]
+
+  # Replay the post-tool-use handler with a success response. Use the stub
+  # plugin root so post-tool-use.sh finds its sibling common.sh.
+  post_payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg tr '{"stdout":"ok"}' \
+    '{tool_name:$t,tool_input:$ti,tool_use_id:"tCHAIN",tool_response:($tr | fromjson)}')"
+  post_handler="$CLAUDE_PLUGIN_ROOT/hooks/handlers/post-tool-use.sh"
+  run bash -c "printf '%s' \"\$1\" | bash '$post_handler'" _ "$post_payload"
+  [ "$status" -eq 0 ]
+  # Audit log must now contain a post-tool-use line after the pre-tool-use line.
+  [ -f "$(audit_log)" ]
+  # Find the asked_allowed_once event on any line (allow=last write, ask=first).
+  grep -q 'asked_allowed_once' "$(audit_log)"
+  # Breadcrumb must be unlinked after PostToolUse consumed it.
+  [ ! -f "$TMPDIR/passthru-pre-tCHAIN.json" ]
 }

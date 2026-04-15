@@ -40,6 +40,24 @@ setup() {
   unset PASSTHRU_OVERLAY_TEST_ANSWER
   unset PASSTHRU_OVERLAY_TOOL_NAME
   unset PASSTHRU_OVERLAY_TOOL_INPUT_JSON
+
+  # Mask any pre-installed tmux/kitty/wezterm at /usr/bin (Ubuntu CI runners
+  # ship tmux by default). A broken symlink in $BIN makes `command -v tmux`
+  # exit 1 even though the real binary exists later on PATH. Non-executable
+  # regular files do NOT work for this because bash's `command -v` returns
+  # 0 on any file that exists on PATH regardless of the x-bit. Tests that
+  # want a multiplexer "on PATH" call plant_stub, which overwrites the mask
+  # with an executable stub.
+  mask_multiplexers() {
+    local name
+    for name in tmux kitty wezterm; do
+      rm -f "$BIN/$name"
+      ln -s "/nonexistent/$name-masked-by-test" "$BIN/$name"
+    done
+  }
+  mask_multiplexers
+  # Every code path that sets PATH goes through plant_stub or restricted_path.
+  # Both paths put $BIN first, so the masks are effective.
 }
 
 teardown() {
@@ -48,16 +66,19 @@ teardown() {
 
 plant_stub() {
   # $1 = name (tmux|kitty|wezterm). Copies the stub under the real name and
-  # puts $BIN in front of PATH.
+  # puts $BIN in front of PATH. Removes any mask symlink planted in setup()
+  # first so the cp lands on a regular file.
   local name="$1"
+  rm -f "$BIN/${name}"
   cp "$STUB_DIR/stub-${name}.sh" "$BIN/${name}"
   chmod +x "$BIN/${name}"
   export PATH="$BIN:$MINIMAL_PATH"
 }
 
 restricted_path() {
-  # Force a PATH with no multiplexers on it at all.
-  export PATH="$MINIMAL_PATH"
+  # Force a PATH with no multiplexers on it. $BIN goes first so the
+  # non-executable masks planted in setup() shadow any /usr/bin multiplexer.
+  export PATH="$BIN:$MINIMAL_PATH"
 }
 
 # ===========================================================================

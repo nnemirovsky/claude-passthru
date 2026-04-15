@@ -176,7 +176,7 @@ for f in "${EXISTING[@]}"; do
   if [ ! -s "$f" ]; then
     # Empty file -> treat as {}.
     PARSED_FILES+=("$f")
-    PARSED_JSON+=('{"version":1,"allow":[],"deny":[],"ask":[]}')
+    PARSED_JSON+=('{"version":1,"allow":[],"deny":[]}')
     continue
   fi
   jq_err=""
@@ -412,7 +412,17 @@ if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
     summary="$(jq -r '.occurrences | map("\(.file)#\(.list)") | join(", ")' <<<"$group")"
     first_file="$(jq -r '.occurrences[0].file' <<<"$group")"
     if [ "$lists_present" -ge 2 ]; then
-      lists_str="$(jq -r '.occurrences | map(.list) | unique | join(" and ")' <<<"$group")"
+      # Build a human-readable list of conflicting sides. Two items use "X and
+      # Y"; three items use an Oxford-comma form "X, Y, and Z" so the triad
+      # case reads naturally instead of the awkward "allow and ask and deny".
+      lists_str="$(jq -r '
+        .occurrences | map(.list) | unique as $ls
+        | if ($ls | length) <= 2 then
+            $ls | join(" and ")
+          else
+            (($ls[:-1] | join(", ")) + ", and " + $ls[-1])
+          end
+      ' <<<"$group")"
       diag error "$first_file" "" "" \
         "conflict: same tool+match appears in ${lists_str} ($summary)"
     else

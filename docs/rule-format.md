@@ -29,6 +29,8 @@ When a file does not include `version`, the loader treats it as `1`.
 
 Schema v2 adds the optional `ask[]` array at the top level. Everything else is unchanged between v1 and v2, so v1 files continue to work without modification. v2 files that do not declare `ask[]` behave identically to v1 files.
 
+**v1 -> v2 upgrade trigger.** `scripts/write-rule.sh` upgrades a file from `version: 1` to `version: 2` in-place the first time an `ask` write lands on it (for example, when you run `/passthru:add --ask ...`). Before that moment your file stays at `version: 1` and the loader keeps treating it as v1. Allow and deny writes do not upgrade the version; only `ask` writes flip the flag. The upgrade preserves any arbitrary extra top-level keys your file may carry and is covered by `tests/write_rule.bats`.
+
 ### `allow` (array, optional)
 
 List of allow rules. When any rule in this list matches the incoming tool call (and no deny rule matches first), the hook emits an `allow` decision and Claude Code skips the native permission dialog.
@@ -137,18 +139,40 @@ Note no `match` block. MCP-namespace rules key off `tool_name` only.
 
 The tool regex `Bash|PowerShell` matches either shell because no `^` is in front. `\\s` is JSON-escaped; inside the regex engine it becomes `\s`.
 
+## Decision flow
+
+One-line summary, in priority order:
+
+**`deny` > `ask` + `allow` in document order > `allow` (generic, unanchored) > mode auto-allow > overlay prompt > native dialog (fallback).**
+
+Read in more detail, this is the full sequence the `PreToolUse` hook follows for every tool call:
+
+1. **Emergency kill switch.** If `~/.claude/passthru.disabled` exists, emit passthrough immediately. The hook does no further work.
+2. **Deny.** Iterate `deny[]` in order. The first rule whose `tool` and `match` both pass triggers a `deny` decision. Deny is globally dominant. Nothing else in the pipeline can override it.
+3. **Ask + allow, document order.** Iterate `allow[]` and `ask[]` interleaved in document order within each merged file, then across files in the fixed scope order (user authored, user imported, project authored, project imported). The first rule whose `tool` and `match` both pass wins:
+   * `allow` match -> emit `allow` (Claude Code skips the dialog).
+   * `ask` match -> route to the overlay (when enabled + a supported multiplexer is available) or emit `permissionDecision: "ask"` so Claude Code shows its native dialog (fallback).
+4. **Mode auto-allow.** If no rule matched, replicate Claude Code's built-in permission-mode short-circuits so the overlay does not fire for calls Claude Code would auto-approve anyway:
+   * `permission_mode: bypassPermissions` -> allow everything.
+   * `permission_mode: acceptEdits` + tool is `Write` or `Edit` + `file_path` inside cwd (literal prefix, no `/../`) -> allow.
+   * `permission_mode: default` (or absent) + tool is `Read` + `file_path` inside cwd -> continue (Claude Code auto-allows on its side).
+   * `permission_mode: plan` -> continue (plan-mode logic handles it).
+5. **Overlay.** If the prior steps do not emit a decision, the hook checks the overlay sentinel and multiplexer detection.
+   * Sentinel `~/.claude/passthru.overlay.disabled` present -> emit `permissionDecision: "ask"` and let Claude Code show its native dialog.
+   * No supported multiplexer detected -> same fallback.
+   * Multiplexer available and overlay enabled -> launch the popup and consume the verdict:
+      * `yes_once` -> allow.
+      * `no_once` -> deny.
+      * `yes_always` -> write an `allow` rule via `write-rule.sh`, emit allow.
+      * `no_always` -> write a `deny` rule, emit deny.
+      * `cancel` / timeout / error -> emit `permissionDecision: "ask"`; native dialog picks up.
+6. **Native fallback.** If the overlay was unavailable, disabled, or cancelled, Claude Code's built-in permission dialog handles the prompt. The PostToolUse hook classifies the outcome into the `asked_*` audit events.
+
+Step 3 is where ask and allow tie-break by document order, not by list name. A narrow `allow: Bash(git)` declared before a broader `ask: Bash(.*)` correctly wins over the ask. Likewise, a narrow `ask: Bash(git push)` declared before a broader `allow: Bash(.*)` correctly wins over the allow. Both are "this call is OK to consider" signals, so the user-provided file order is the tie-breaker.
+
 ## Matching semantics
 
-When a tool call fires, the `PreToolUse` hook runs this algorithm against the merged rule set:
-
-1. Check the emergency sentinel `~/.claude/passthru.disabled`. If present, emit passthrough immediately.
-2. Iterate `deny[]` in order. The first rule whose `tool` and `match` both pass triggers a `deny` decision. The hook stops here.
-3. Iterate `allow[]` and `ask[]` together, in document order within each merged list. The first rule whose `tool` and `match` both pass wins:
-   * An `allow` match triggers an `allow` decision (Claude Code skips the dialog).
-   * An `ask` match triggers the overlay (if enabled and available) or falls through so Claude Code shows its native permission dialog.
-4. If nothing matched, emit passthrough. Claude Code then consults the native permission system.
-
-Decision priority, in short: **`deny` > `allow` + `ask` in document order**. `deny` is globally dominant. Between `allow` and `ask`, document order wins: a narrow `allow: Bash(git)` declared before a broader `ask: Bash(.*)` correctly wins over the ask. Likewise, a narrow `ask: Bash(git push)` declared before a broader `allow: Bash(.*)` correctly wins over the allow. Both `allow` and `ask` are "this call is OK to consider" signals (allow = silent yes, ask = ask the user), so their relative ordering is the user's explicit intent via file order.
+The decision flow above is the full algorithm. Per-rule matching (the `tool + match` check used in steps 2 and 3) works as follows.
 
 "Tool and match both pass" means:
 
@@ -157,15 +181,6 @@ Decision priority, in short: **`deny` > `allow` + `ask` in document order**. `de
 * Missing `tool` = match any tool. Missing `match` = match any input.
 
 Regex compilation errors at match time do NOT crash the hook; they skip the offending rule and continue. The verifier catches these eagerly so they never reach the hot path.
-
-### `ask` routing (overlay vs native dialog)
-
-When an `ask` rule matches, the hook consults the user's overlay configuration:
-
-* Overlay enabled + supported terminal multiplexer available (tmux / kitty / wezterm) -> invoke the passthru overlay dialog. The user answers once/always/deny through it.
-* Overlay disabled (sentinel `~/.claude/passthru.overlay.disabled`) OR no supported multiplexer -> emit `permissionDecision: "ask"` back to Claude Code, which shows its own native permission dialog.
-
-Either path is a prompt. The difference is purely UX: passthru's overlay gives a consistent interface across tools, while Claude Code's native dialog is the unchanged default.
 
 ## Merge semantics across scopes
 

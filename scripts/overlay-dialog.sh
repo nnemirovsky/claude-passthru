@@ -97,8 +97,11 @@ render_menu() {
   local preview=""
   if [ -n "$TOOL_INPUT_JSON" ]; then
     preview="$TOOL_INPUT_JSON"
-    if [ "${#preview}" -gt 120 ]; then
-      preview="${preview:0:117}..."
+    # Max display width for tool_input in the overlay menu.
+    local max_preview=120
+    local truncated_len=$((max_preview - 3))  # room for "..."
+    if [ "${#preview}" -gt "$max_preview" ]; then
+      preview="${preview:0:$truncated_len}..."
     fi
   fi
   cat <<MENU
@@ -228,6 +231,8 @@ case "$confirm_lc" in
     ;;
   e)
     # Edit path. Read a full line with -e so readline handles cursor motion.
+    # Validate edited JSON before committing; invalid input falls back to
+    # the proposed rule so the user is not silently downgraded.
     printf 'Edit rule JSON (leave blank to accept): '
     edited=""
     if ! IFS= read -r -e -t "$TIMEOUT" edited; then
@@ -235,8 +240,14 @@ case "$confirm_lc" in
     fi
     if [ -z "$edited" ]; then
       write_verdict_always "$answer" "$proposed"
-    else
+    elif jq -e 'type == "object"' >/dev/null 2>&1 <<<"$edited"; then
+      # Require a JSON object specifically. Bare strings/numbers/arrays are
+      # valid JSON but not valid rule shapes, and write-rule.sh would reject
+      # them with a less helpful error.
       write_verdict_always "$answer" "$edited"
+    else
+      printf 'Invalid JSON (must be an object); falling back to suggested rule:\n  %s\n' "$proposed"
+      write_verdict_always "$answer" "$proposed"
     fi
     ;;
   $'\e')

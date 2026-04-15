@@ -197,6 +197,36 @@ emit_decision() {
     }'
 }
 
+# emit_ask_fallback <reason_tag>
+# Centralizes the six ask-emit fallback paths (overlay disabled / unavailable
+# / script missing / launch failure / cancel / unknown verdict). Reads the
+# enclosing scope for MATCHED, OVERLAY_REASON, OVERLAY_RULE_IDX, OVERLAY_PATTERN,
+# TOOL_NAME, TOOL_INPUT, TOOL_USE_ID, and FALLBACK_ASK_REASON.
+#
+# Behavior (preserves per-path semantics):
+#   * Emits permissionDecision:"ask" with the precomputed FALLBACK_ASK_REASON.
+#   * If the precomputed MATCHED was an ask rule: logs the ask event with the
+#     matched rule's reason / rule_index / pattern (so /passthru:log can still
+#     attribute the prompt to the rule that triggered it).
+#   * Otherwise: logs the ask event tagged with `reason_tag` (e.g. "overlay
+#     cancel") and null rule_index / pattern (no rule matched).
+#   * Drops a breadcrumb so PostToolUse can classify the native-dialog outcome.
+#   * Exits 0 (all ask-fallback sites are terminal).
+#
+# Each call site shrinks to a single invocation, preventing the drift that
+# previously left the unknown-verdict branch losing ask-rule metadata.
+emit_ask_fallback() {
+  local reason_tag="$1"
+  emit_decision "ask" "$FALLBACK_ASK_REASON"
+  if [ "$MATCHED" = "ask" ]; then
+    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
+  else
+    audit_write_line "ask" "$TOOL_NAME" "$reason_tag" "" "" "$TOOL_USE_ID"
+  fi
+  audit_write_breadcrumb "$TOOL_USE_ID" "$TOOL_NAME" "$TOOL_INPUT"
+  exit 0
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -277,7 +307,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
           stripped="${SELF_CMD#"$SELF_PREFIX"}"
           script="${stripped%% *}"
           case "$script" in
-            verify.sh|write-rule.sh|bootstrap.sh|log.sh)
+            verify.sh|write-rule.sh|bootstrap.sh|log.sh|overlay-config.sh|list.sh|remove-rule.sh)
               SELF_ALLOWED=1
               SELF_PATTERN="CLAUDE_PLUGIN_ROOT=${CLAUDE_PLUGIN_ROOT}"
               ;;
@@ -495,28 +525,18 @@ else
 fi
 
 # Overlay opt-out short-circuit: sentinel present -> skip overlay entirely,
-# emit the native-dialog fallback.
+# emit the native-dialog fallback. Drop a breadcrumb so post-tool-use.sh can
+# classify the native-dialog outcome into asked_* audit events.
 if overlay_disabled; then
-  emit_decision "ask" "$FALLBACK_ASK_REASON"
-  if [ "$MATCHED" = "ask" ]; then
-    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
-  else
-    audit_write_line "ask" "$TOOL_NAME" "overlay disabled" "" "" "$TOOL_USE_ID"
-  fi
-  exit 0
+  emit_ask_fallback "overlay disabled"
 fi
 
 # No multiplexer available: warn + emit native-dialog fallback. Log one
-# stderr line per call (session-level dedup is fine to defer).
+# stderr line per call (session-level dedup is fine to defer). Breadcrumb
+# enables PostToolUse asked_* classification of the native-dialog outcome.
 if ! overlay_available; then
   printf '[passthru] overlay enabled but no supported multiplexer (tmux/kitty/wezterm); falling back to native dialog\n' >&2
-  emit_decision "ask" "$FALLBACK_ASK_REASON"
-  if [ "$MATCHED" = "ask" ]; then
-    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
-  else
-    audit_write_line "ask" "$TOOL_NAME" "overlay unavailable" "" "" "$TOOL_USE_ID"
-  fi
-  exit 0
+  emit_ask_fallback "overlay unavailable"
 fi
 
 # Overlay is available. Prep the per-call result file, invoke overlay.sh,
@@ -530,15 +550,10 @@ OVERLAY_SH="${_overlay_root}/scripts/overlay.sh"
 
 if [ ! -f "$OVERLAY_SH" ]; then
   # Missing script is the same failure shape as a launch error: warn + fall
-  # through to native dialog.
+  # through to native dialog. Breadcrumb is required so PostToolUse can classify
+  # the native-dialog outcome.
   printf '[passthru] overlay script not found at %s; falling back to native dialog\n' "$OVERLAY_SH" >&2
-  emit_decision "ask" "$FALLBACK_ASK_REASON"
-  if [ "$MATCHED" = "ask" ]; then
-    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
-  else
-    audit_write_line "ask" "$TOOL_NAME" "overlay script missing" "" "" "$TOOL_USE_ID"
-  fi
-  exit 0
+  emit_ask_fallback "overlay script missing"
 fi
 
 # Per-call result file. Use sanitized tool_use_id when available so
@@ -576,15 +591,9 @@ trap 'printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passth
 if [ "$OVERLAY_RC" -ne 0 ]; then
   # Launch failure (rc 1 = no multiplexer detected at launch time, rc 2 =
   # popup error). Warn + fall through to native dialog so the user still
-  # gets to approve/deny.
+  # gets to approve/deny. Breadcrumb lets PostToolUse classify the outcome.
   printf '[passthru] overlay.sh exited %d; falling back to native dialog\n' "$OVERLAY_RC" >&2
-  emit_decision "ask" "$FALLBACK_ASK_REASON"
-  if [ "$MATCHED" = "ask" ]; then
-    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
-  else
-    audit_write_line "ask" "$TOOL_NAME" "overlay launch failure" "" "" "$TOOL_USE_ID"
-  fi
-  exit 0
+  emit_ask_fallback "overlay launch failure"
 fi
 
 # Read the verdict. Absent / empty file -> cancel.
@@ -612,30 +621,31 @@ case "$VERDICT" in
     exit 0
     ;;
   yes_always|no_always)
-    # Persist the proposed rule via write-rule.sh. Scope defaults to user
-    # unless the rule JSON explicitly carries a "scope" field; we honor
-    # "user" / "project" and ignore unknown values.
+    # Persist the proposed rule via write-rule.sh. Scope is always user:
+    # overlay-dialog.sh does not expose a scope picker today, and the
+    # proposer never writes one. If a future overlay UX adds per-rule scope
+    # selection, add scope extraction here then.
     target_list="allow"
     [ "$VERDICT" = "no_always" ] && target_list="deny"
     target_scope="user"
     if [ -n "$RULE_JSON_LINE" ] && jq -e '.' >/dev/null 2>&1 <<<"$RULE_JSON_LINE"; then
-      _requested_scope="$(jq -r '.scope // ""' <<<"$RULE_JSON_LINE" 2>/dev/null || printf '')"
-      case "$_requested_scope" in
-        user|project) target_scope="$_requested_scope" ;;
-      esac
-      # Strip any helper fields before persisting the rule so write-rule.sh
-      # sees a clean {tool,match,reason} shape.
-      _rule_to_write="$(jq -c 'del(.scope)' <<<"$RULE_JSON_LINE" 2>/dev/null || printf '%s' "$RULE_JSON_LINE")"
+      _rule_to_write="$RULE_JSON_LINE"
 
       _write_rc=0
+      _write_stderr=""
       WRITE_RULE_SH="${_overlay_root}/scripts/write-rule.sh"
       if [ -f "$WRITE_RULE_SH" ]; then
         # Same ERR-trap dance as the overlay invocation: disable before, re-arm
         # after, so a non-zero write-rule.sh does not tumble into the fail-open
         # passthrough path.
+        #
+        # Capture stderr so we can surface write-rule.sh diagnostics (verifier
+        # errors, lock timeout, schema conflicts) to the user instead of
+        # swallowing them. stdout stays discarded because write-rule.sh prints
+        # its success banner there.
         trap - ERR
         set +e
-        bash "$WRITE_RULE_SH" "$target_scope" "$target_list" "$_rule_to_write" >/dev/null 2>&1
+        _write_stderr="$(bash "$WRITE_RULE_SH" "$target_scope" "$target_list" "$_rule_to_write" 2>&1 >/dev/null)"
         _write_rc=$?
         set -e
         trap 'printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
@@ -645,6 +655,12 @@ case "$VERDICT" in
       if [ "$_write_rc" -ne 0 ]; then
         printf '[passthru] overlay: write-rule.sh failed rc=%d for %s/%s; applying decision for this call only\n' \
           "$_write_rc" "$target_scope" "$target_list" >&2
+        if [ -n "$_write_stderr" ]; then
+          # Tag each line so users can grep the hook's output under --debug.
+          while IFS= read -r _line; do
+            printf '[passthru] write-rule: %s\n' "$_line" >&2
+          done <<< "$_write_stderr"
+        fi
       fi
     else
       printf '[passthru] overlay: %s verdict without valid rule JSON; applying decision for this call only\n' \
@@ -664,21 +680,16 @@ case "$VERDICT" in
     ;;
   cancel|'')
     # Explicit cancel OR absent/empty result file both collapse to the
-    # native-dialog fallback.
-    emit_decision "ask" "$FALLBACK_ASK_REASON"
-    if [ "$MATCHED" = "ask" ]; then
-      audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
-    else
-      audit_write_line "ask" "$TOOL_NAME" "overlay cancel" "" "" "$TOOL_USE_ID"
-    fi
-    exit 0
+    # native-dialog fallback. Breadcrumb lets PostToolUse classify the
+    # native-dialog outcome into asked_* events.
+    emit_ask_fallback "overlay cancel"
     ;;
   *)
-    # Unknown verdict string: treat as cancel (fail-safe).
+    # Unknown verdict string: treat as cancel (fail-safe). Breadcrumb keeps
+    # PostToolUse classification coverage aligned with the other fallback
+    # branches.
     printf '[passthru] overlay: unknown verdict %s; falling back to native dialog\n' "$VERDICT" >&2
-    emit_decision "ask" "$FALLBACK_ASK_REASON"
-    audit_write_line "ask" "$TOOL_NAME" "overlay unknown verdict" "" "" "$TOOL_USE_ID"
-    exit 0
+    emit_ask_fallback "overlay unknown verdict"
     ;;
 esac
 

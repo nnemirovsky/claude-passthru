@@ -33,6 +33,19 @@ setup() {
 
   # Plain output (no ANSI, no tty quirks).
   export TERM=dumb
+
+  # Mask any pre-installed tmux/kitty/wezterm on /usr/bin (Ubuntu CI ships
+  # tmux at /usr/bin/tmux). A broken symlink in $BIN makes `command -v tmux`
+  # exit 1 even though the real binary is later on PATH. Regular non-exec
+  # files do NOT work: bash's `command -v` returns 0 on any file that exists
+  # on PATH regardless of the x-bit. Tests that want a multiplexer "on PATH"
+  # call plant_stub, which removes the mask and overwrites it with an
+  # executable stub.
+  local name
+  for name in tmux kitty wezterm; do
+    rm -f "$BIN/$name"
+    ln -s "/nonexistent/$name-masked-by-test" "$BIN/$name"
+  done
 }
 
 teardown() {
@@ -47,9 +60,11 @@ run_cfg() {
 
 # plant_stub <name> - drop a no-op stub binary into $BIN so `command -v`
 # succeeds. We don't care what the stub does since --status only queries
-# PATH presence.
+# PATH presence. Removes any mask symlink planted in setup() first so the
+# heredoc write lands on a regular file.
 plant_stub() {
   local name="$1"
+  rm -f "$BIN/$name"
   cat > "$BIN/$name" <<'EOF'
 #!/usr/bin/env bash
 exit 0
