@@ -4,20 +4,21 @@
 # Purpose:
 #   One-time, best-effort hint nudging brand-new passthru users to run
 #   `/passthru:bootstrap` if they already have native permission rules in
-#   their `~/.claude/settings.json` that could be imported. Prints a
-#   single-line plain-text message on stdout, which Claude Code surfaces
-#   in the session header as "SessionStart:startup says: <text>". Then
-#   touches a marker so the hint does not fire again.
+#   their `~/.claude/settings.json` that could be imported. Emits a JSON
+#   envelope `{"systemMessage": "<text>"}` on stdout, which Claude Code
+#   surfaces in the session view as "SessionStart:startup says: <text>".
+#   Then touches a marker so the hint does not fire again.
 #
 # Contract:
 #   stdin  - JSON envelope from Claude Code (SessionStart hook). We do
-#            not need any of its fields; we still drain stdin defensively
-#            so the writer does not hit SIGPIPE.
-#   stdout - a single line of plain text when the hint should fire,
-#            otherwise EMPTY. Per Claude Code docs, SessionStart stdout
-#            is appended to the session view as
-#            "SessionStart:startup says: <text>". Anything else (e.g.
-#            `{}`) would appear verbatim to the user.
+#            not need any of its fields, and `exec < /dev/null` up front
+#            ensures nothing downstream ever blocks on reading it.
+#   stdout - a single-line JSON object `{"systemMessage":"<text>"}` when
+#            the hint should fire, otherwise EMPTY. Per Claude Code
+#            docs, SessionStart `systemMessage` is surfaced in the
+#            session view as "SessionStart:startup says: <text>". Plain
+#            text stdout does NOT surface - the JSON envelope is the
+#            correct contract.
 #   exit   - always 0. Any error fails open (empty stdout, exit 0).
 #
 # Gating:
@@ -28,13 +29,22 @@
 #     marker and exit silently.
 #   - If `~/.claude/settings.json` has no `.permissions.allow` entries,
 #     there is nothing to import - touch the marker and exit silently.
-#   - Otherwise: count the allow entries, emit the hint on stdout, touch
-#     the marker.
+#   - Otherwise: count the allow entries, emit the hint as a JSON
+#     `systemMessage` envelope on stdout, touch the marker.
 #
 # Paths honor PASSTHRU_USER_HOME and PASSTHRU_PROJECT_DIR so bats tests
 # never touch the real ~/.claude.
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Redirect stdin to /dev/null before sourcing common.sh or running any
+# command that might read from it. SessionStart never needs stdin contents,
+# and on macOS Claude Code can keep the pipe open across `claude --resume`
+# which would hang any cat/read call. This mirrors the pattern used by
+# memsearch's session-start.sh.
+# ---------------------------------------------------------------------------
+exec < /dev/null
 
 # ---------------------------------------------------------------------------
 # Locate and source common.sh (same pattern as pre/post handlers)
@@ -57,15 +67,6 @@ fi
 # Fail-open wrapper: any unexpected error prints nothing + exit 0.
 # ---------------------------------------------------------------------------
 trap 'printf "[passthru] unexpected error in session-start.sh\n" >&2; exit 0' ERR
-
-# ---------------------------------------------------------------------------
-# Drain stdin defensively so the parent does not see SIGPIPE on its
-# write end. We do not use the payload; SessionStart fields are not needed
-# for this one-time hint.
-# ---------------------------------------------------------------------------
-if [ ! -t 0 ]; then
-  cat >/dev/null 2>&1 || true
-fi
 
 USER_HOME="$(passthru_user_home)"
 MARKER="${USER_HOME}/.claude/passthru.bootstrap-hint-shown"
@@ -132,10 +133,17 @@ if [ "$COUNT" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Emit the one-time hint on stdout and persist the marker.
-#    Single line keeps the session header readable.
+# 4. Emit the one-time hint on stdout as a JSON `systemMessage` envelope
+#    and persist the marker. Claude Code surfaces the systemMessage in the
+#    session view as "SessionStart:startup says: <text>".
 # ---------------------------------------------------------------------------
-printf 'passthru: detected %s importable permission rule(s) in ~/.claude/settings.json. Run /passthru:bootstrap to convert them. This tip only shows once.\n' "$COUNT"
+HINT_MSG="passthru: detected ${COUNT} importable permission rule(s) in ~/.claude/settings.json. Run /passthru:bootstrap to convert them. This tip only shows once."
+
+# jq -nc builds a compact JSON object with proper escaping. Fail-open: if
+# jq cannot produce output, we stay silent rather than emit broken JSON.
+if ENVELOPE="$(jq -nc --arg msg "$HINT_MSG" '{systemMessage:$msg}' 2>/dev/null)"; then
+  printf '%s\n' "$ENVELOPE"
+fi
 
 touch_marker
 exit 0

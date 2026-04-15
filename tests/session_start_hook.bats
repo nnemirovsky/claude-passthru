@@ -20,11 +20,13 @@
 # Hermetic via PASSTHRU_USER_HOME / PASSTHRU_PROJECT_DIR.
 #
 # Contract notes:
-#   Per Claude Code docs, SessionStart stdout is plain text and surfaces in the
-#   session view as "SessionStart:startup says: <text>". The handler therefore
-#   emits the hint on stdout (not stderr) when it fires, and emits nothing on
-#   stdout in all other cases - including the marker-present short-circuit -
-#   so the session header stays clean.
+#   Per Claude Code docs, the SessionStart hook surfaces its `systemMessage`
+#   JSON field in the session view as "SessionStart:startup says: <text>".
+#   The handler therefore emits `{"systemMessage":"<text>"}` on stdout when
+#   the hint fires, and emits nothing on stdout in all other cases -
+#   including the marker-present short-circuit - so the session header stays
+#   clean. Plain text stdout does NOT surface, so earlier versions of this
+#   hook were silently ignored by Claude Code.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -65,6 +67,19 @@ run_handler() {
   export status STDOUT STDERR
 }
 
+# assert_hint_envelope: verify STDOUT is a well-formed JSON object with
+# `.systemMessage` containing the passthru hint fragments. Requires jq.
+assert_hint_envelope() {
+  # Must be parseable as JSON.
+  jq -e '.' <<<"$STDOUT" >/dev/null
+  # Must have a systemMessage string field.
+  jq -e '.systemMessage | type == "string"' <<<"$STDOUT" >/dev/null
+  local msg
+  msg="$(jq -r '.systemMessage' <<<"$STDOUT")"
+  [[ "$msg" == *"/passthru:bootstrap"* ]]
+  [[ "$msg" == *"only shows once"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Marker short-circuit
 # ---------------------------------------------------------------------------
@@ -77,7 +92,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  # stdout must be empty - no `{}` noise in the session header.
+  # stdout must be empty - no JSON envelope in the session header.
   [ -z "$STDOUT" ]
   # No stderr hint.
   [ -z "$STDERR" ]
@@ -167,17 +182,27 @@ run_handler() {
 # Actual hint path.
 # ---------------------------------------------------------------------------
 
-@test "session-start: settings.json with N allow entries -> hint on stdout mentions N and /passthru:bootstrap" {
+@test "session-start: settings.json with N allow entries -> hint systemMessage mentions N and /passthru:bootstrap" {
   printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)","mcp__context7__query-docs"]}}' \
     > "$USER_ROOT/.claude/settings.json"
 
   run_handler '{}'
   [ "$status" -eq 0 ]
 
-  # Hint lands on stdout so Claude Code can surface it in the session header.
-  [[ "$STDOUT" == *"3 importable"* ]]
-  [[ "$STDOUT" == *"/passthru:bootstrap"* ]]
-  [[ "$STDOUT" == *"only shows once"* ]]
+  # Hint lands on stdout wrapped in the Claude Code JSON contract so it
+  # surfaces as "SessionStart:startup says: <text>".
+  jq -e '.' <<<"$STDOUT" >/dev/null
+  local msg
+  msg="$(jq -r '.systemMessage' <<<"$STDOUT")"
+  [[ "$msg" == *"3 importable"* ]]
+  [[ "$msg" == *"/passthru:bootstrap"* ]]
+  [[ "$msg" == *"only shows once"* ]]
+
+  # Only the systemMessage key should be present - keep the envelope
+  # minimal so we do not accidentally inject context.
+  local keys
+  keys="$(jq -r 'keys | join(",")' <<<"$STDOUT")"
+  [ "$keys" = "systemMessage" ]
 
   # Nothing on stderr in the happy path.
   [ -z "$STDERR" ]
@@ -193,6 +218,7 @@ run_handler() {
   run_handler '{}'
   [ "$status" -eq 0 ]
   [ -n "$STDOUT" ]
+  assert_hint_envelope
   [ -f "$(marker_path)" ]
 
   # Second invocation must be silent on both streams.
@@ -213,8 +239,8 @@ run_handler() {
 
   run_handler 'not-json{{{'
   [ "$status" -eq 0 ]
-  # The hint should still fire (stdin is drained, never parsed).
-  [[ "$STDOUT" == *"/passthru:bootstrap"* ]]
+  # The hint should still fire (stdin is redirected to /dev/null, never parsed).
+  assert_hint_envelope
   # Marker must still be touched since nothing else went wrong.
   [ -f "$(marker_path)" ]
 }
@@ -225,7 +251,7 @@ run_handler() {
 
   run_handler ''
   [ "$status" -eq 0 ]
-  [[ "$STDOUT" == *"/passthru:bootstrap"* ]]
+  assert_hint_envelope
   [ -f "$(marker_path)" ]
 }
 
