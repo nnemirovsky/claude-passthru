@@ -145,6 +145,31 @@ EOF
   [ "$count" -eq 1 ]
 }
 
+@test "--event errored selects only errored entries (PostToolUseFailure output)" {
+  # `errored` is the new event emitted by post-tool-use-failure.sh for
+  # non-permission tool failures (timeouts, interrupts, runtime errors).
+  # Plan line 339: "Add test /passthru:log --event errored filters correctly".
+  write_fixture
+  # Append a synthetic errored entry alongside the fixture rows.
+  local now
+  now="$(date -u +%s)"
+  cat >> "$LOG_PATH" <<EOF
+{"ts":"$(iso_from_epoch "$now")","event":"errored","source":"native","tool":"Bash","tool_use_id":"fail1","error_type":"not_found"}
+EOF
+  run_log --event '^errored$' --format raw
+  [ "$status" -eq 0 ]
+  local count
+  count="$(printf '%s\n' "$output" | grep -c '"event":"errored"' || true)"
+  [ "$count" -eq 1 ]
+  # No other events leaked through.
+  [[ "$output" != *'"event":"allow"'* ]]
+  [[ "$output" != *'"event":"deny"'* ]]
+  [[ "$output" != *'"event":"passthrough"'* ]]
+  [[ "$output" != *'"event":"asked_'* ]]
+  # error_type is preserved on the raw JSONL line.
+  [[ "$output" == *'"error_type":"not_found"'* ]]
+}
+
 # -- filter: --tool ---------------------------------------------------------
 
 @test "--tool Bash selects only Bash tool entries" {

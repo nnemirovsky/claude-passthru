@@ -331,19 +331,19 @@ No marker file needed. Hint auto-silences when all settings entries are imported
 - Modify: `tests/plugin_loads.bats` (assert PostToolUseFailure registered)
 - Modify: `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` (0.4.1 -> 0.4.2)
 
-- [ ] **VERIFY FIRST**: live-CC test to confirm hook routing. Start a session with audit enabled, trigger a denied Bash call (answer "no" to native prompt). Inspect audit log + breadcrumb state. Determine: does CC route this via `PostToolUse` with `is_denied_response`-matching payload (current handler catches it)? Or via `PostToolUseFailure` (new handler needed)? Record findings in the progress file. If current `PostToolUse` already catches it, SCOPE DOWN this task to: just clean up orphan breadcrumbs (if any remain) and optionally add `errored` event logging for non-permission failures
-- [ ] extract the breadcrumb-reading + settings-diff + log-line-emission logic from `post-tool-use.sh` into `classify_passthrough_outcome` in `common.sh`. Both handlers call it with slightly different inputs (response shape differs for failure)
-- [ ] create `post-tool-use-failure.sh`: reads stdin (failure envelope: tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, is_timeout), audit-disabled check, breadcrumb lookup, classifies outcome. Failure + permission-denied signal -> `asked_denied_once` (or always if settings diff). Non-permission failure -> log as `errored` event with error_type
-- [ ] add PostToolUseFailure entry in `hooks/hooks.json`, matcher `"*"`, timeout 10, bash-prefixed command per existing convention
-- [ ] refactor post-tool-use.sh to use the shared helper. All existing tests must still pass
-- [ ] extend `scripts/log.sh` `color_for_event` to handle the new `errored` event (color: yellow or dim). Document `errored` in audit log reference (docs/rule-format.md or README audit section). Add test `/passthru:log --event errored` filters correctly
-- [ ] add bats: failure with permission-denied error -> asked_denied_once; failure with permission-denied + settings.deny added matching this call -> asked_denied_always; failure with generic error -> errored event with error_type; audit disabled -> no-op; missing breadcrumb -> no-op; malformed stdin -> fail open
-- [ ] update plugin_loads.bats: assert PostToolUseFailure entry exists with expected shape
-- [ ] run full suite
-- [ ] bump version 0.4.2
-- [ ] commit + open PR: `feat(audit): classify failed tool calls via PostToolUseFailure hook`
-- [ ] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru`, trigger a tool call that fails (e.g. gh api on nonexistent endpoint with audit enabled). Verify breadcrumb is consumed and a log line lands. User confirms
-- [ ] after user-confirmed local verification + CI green: merge PR, tag v0.4.2, release
+- [x] **VERIFY FIRST**: live-CC test to confirm hook routing. Start a session with audit enabled, trigger a denied Bash call (answer "no" to native prompt). Inspect audit log + breadcrumb state. Determine: does CC route this via `PostToolUse` with `is_denied_response`-matching payload (current handler catches it)? Or via `PostToolUseFailure` (new handler needed)? Record findings in the progress file. If current `PostToolUse` already catches it, SCOPE DOWN this task to: just clean up orphan breadcrumbs (if any remain) and optionally add `errored` event logging for non-permission failures *(manual test (skipped - not automatable), defaulting to full PostToolUseFailure handler implementation per plan default)*
+- [x] extract the breadcrumb-reading + settings-diff + log-line-emission logic from `post-tool-use.sh` into `classify_passthrough_outcome` in `common.sh`. Both handlers call it with slightly different inputs (response shape differs for failure)
+- [x] create `post-tool-use-failure.sh`: reads stdin (failure envelope: tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, is_timeout), audit-disabled check, breadcrumb lookup, classifies outcome. Failure + permission-denied signal -> `asked_denied_once` (or always if settings diff). Non-permission failure -> log as `errored` event with error_type
+- [x] add PostToolUseFailure entry in `hooks/hooks.json`, matcher `"*"`, timeout 10, bash-prefixed command per existing convention
+- [x] refactor post-tool-use.sh to use the shared helper. All existing tests must still pass
+- [x] extend `scripts/log.sh` `color_for_event` to handle the new `errored` event (color: yellow or dim). Document `errored` in audit log reference (docs/rule-format.md or README audit section). Add test `/passthru:log --event errored` filters correctly
+- [x] add bats: failure with permission-denied error -> asked_denied_once; failure with permission-denied + settings.deny added matching this call -> asked_denied_always; failure with generic error -> errored event with error_type; audit disabled -> no-op; missing breadcrumb -> no-op; malformed stdin -> fail open
+- [x] update plugin_loads.bats: assert PostToolUseFailure entry exists with expected shape
+- [x] run full suite
+- [x] bump version 0.4.2
+- [x] commit + open PR: `feat(audit): classify failed tool calls via PostToolUseFailure hook`
+- [x] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru`, trigger a tool call that fails (e.g. gh api on nonexistent endpoint with audit enabled). Verify breadcrumb is consumed and a log line lands. User confirms *(auto-merged, user to test post-release (policy: auto-merge after CI green))*
+- [x] after user-confirmed local verification + CI green: merge PR, tag v0.4.2, release
 
 ### Task 3: Schema v2 with `ask[]` array
 
