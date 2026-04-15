@@ -280,16 +280,6 @@ color_for_list() {
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-truncate_str() {
-  local s="$1" max="$2"
-  local len=${#s}
-  if [ "$len" -le "$max" ]; then
-    printf '%s' "$s"
-  else
-    printf '%s...' "${s:0:max-3}"
-  fi
-}
-
 # match_summary <rule-json>: "key1: pat1, key2: pat2" or "-".
 match_summary() {
   local rule="$1"
@@ -314,46 +304,201 @@ rule_tool() {
   jq -r '.tool // ""' <<<"$rule"
 }
 
+# Detect terminal width. Honors COLUMNS override (tests can set it).
+# Falls back to `tput cols`, then 120.
+term_width() {
+  if [ -n "${COLUMNS:-}" ] && [ "${COLUMNS}" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$COLUMNS"
+    return
+  fi
+  local w=""
+  if command -v tput >/dev/null 2>&1; then
+    w="$(tput cols 2>/dev/null || true)"
+  fi
+  if [ -n "$w" ] && [ "$w" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$w"
+  else
+    printf '120'
+  fi
+}
+
+# wrap_text <text> <width> [<out-var-array-name>]
+# Populates the named bash array with one element per wrapped line.
+# Empty input yields a single empty line (so every row still renders).
+# Prefers break points at space / `|` / `,` within the last quarter of <width>.
+wrap_text() {
+  local text="$1" width="$2" arr_name="${3:-__wrap_out}"
+  # Reset the output array to empty.
+  eval "$arr_name=()"
+  if [ "$width" -le 0 ]; then
+    eval "$arr_name+=(\"\$text\")"
+    return
+  fi
+  local remaining="$text"
+  while [ -n "$remaining" ]; do
+    local len=${#remaining}
+    if [ "$len" -le "$width" ]; then
+      eval "$arr_name+=(\"\$remaining\")"
+      break
+    fi
+    # Hunt for a friendly break within the last quarter of the width.
+    local lookback=$(( width / 4 ))
+    [ "$lookback" -lt 1 ] && lookback=1
+    local low=$(( width - lookback ))
+    [ "$low" -lt 1 ] && low=1
+    local break_pos=-1
+    local ch i
+    for (( i = width - 1; i >= low; i-- )); do
+      ch="${remaining:$i:1}"
+      case "$ch" in
+        ' '|'|'|',') break_pos=$i; break ;;
+      esac
+    done
+    local chunk rest_start
+    if [ "$break_pos" -ge 0 ]; then
+      # Keep the friendly break character on the current chunk so visual
+      # continuity is preserved (e.g. the trailing ",").
+      chunk="${remaining:0:break_pos+1}"
+      rest_start=$(( break_pos + 1 ))
+      # Trim leading whitespace from the continuation so indentation is not
+      # doubled-up.
+      while [ "$rest_start" -lt "$len" ] && [ "${remaining:$rest_start:1}" = " " ]; do
+        rest_start=$(( rest_start + 1 ))
+      done
+    else
+      chunk="${remaining:0:$width}"
+      rest_start=$width
+    fi
+    eval "$arr_name+=(\"\$chunk\")"
+    remaining="${remaining:$rest_start}"
+  done
+  # Text was originally empty; emit one empty cell.
+  local __wrap_len
+  eval "__wrap_len=\${#$arr_name[@]}"
+  if [ "$__wrap_len" -eq 0 ]; then
+    eval "$arr_name+=('')"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Renderers
 # ---------------------------------------------------------------------------
 
+# Column layout for the flat renderer:
+#   scope(8) list(6) source(9) #(4) tool(W_tool) match-summary(W_match) reason(rest)
+# Fixed columns sum: 8+1+6+1+9+1+4+2 = 32 chars (with single-space gaps and
+# the double-space after #). Then tool, match, reason share the rest.
 render_flat_table() {
   local use_color=0
   tty_color && use_color=1
   local reset=""
   [ "$use_color" -eq 1 ] && reset='\033[0m'
-  printf '%-8s %-6s %-9s %4s  %-18s %-40s %s\n' \
-    'scope' 'list' 'source' '#' 'tool' 'match-summary' 'reason'
-  printf '%s\n' '------------------------------------------------------------------------------------------------------'
-  local n i entry scope list source idx tool match_sum reason color
+
+  local total
+  total="$(term_width)"
+
+  # Fixed lead columns consume this many chars (see above).
+  local fixed=32
+
+  local n i entry scope list source idx tool match_sum reason
   n="$(jq -r 'length' <<<"$ANNOTATED")"
+
+  # First pass: widest tool.
+  local widest_tool=4 t_len
+  for ((i = 0; i < n; i++)); do
+    entry="$(jq -c ".[${i}]" <<<"$ANNOTATED")"
+    tool="$(rule_tool "$(jq -c '.rule' <<<"$entry")")"
+    [ -z "$tool" ] && tool="-"
+    t_len=${#tool}
+    [ "$t_len" -gt "$widest_tool" ] && widest_tool="$t_len"
+  done
+  local W_tool=$widest_tool
+  [ "$W_tool" -lt 12 ] && W_tool=12
+  [ "$W_tool" -gt 20 ] && W_tool=20
+
+  # Remaining budget for match + reason.
+  local remaining=$(( total - fixed - W_tool - 1 ))
+  [ "$remaining" -lt 50 ] && remaining=50
+  local W_match=$(( remaining * 60 / 100 ))
+  local W_reason=$(( remaining - W_match - 1 ))
+  [ "$W_match" -lt 30 ] && W_match=30
+  [ "$W_reason" -lt 20 ] && W_reason=20
+
+  local fmt_hdr="%-8s %-6s %-9s %4s  %-${W_tool}s %-${W_match}s %s"
+  # shellcheck disable=SC2059
+  printf "$fmt_hdr\n" 'scope' 'list' 'source' '#' 'tool' 'match-summary' 'reason'
+
+  local dash_total=$(( fixed + W_tool + 1 + W_match + 1 + W_reason ))
+  local dashes=""
+  local d
+  for ((d = 0; d < dash_total; d++)); do dashes="${dashes}-"; done
+  printf '%s\n' "$dashes"
+
+  local match_lines=() reason_lines=()
+  local max_lines li msum_line reason_line color pad_match pad_tool
   for ((i = 0; i < n; i++)); do
     entry="$(jq -c ".[${i}]" <<<"$ANNOTATED")"
     scope="$(jq -r '.scope' <<<"$entry")"
     list="$(jq -r '.list' <<<"$entry")"
     source="$(jq -r '.source' <<<"$entry")"
     idx="$(jq -r '.index' <<<"$entry")"
-    tool="$(truncate_str "$(rule_tool "$(jq -c '.rule' <<<"$entry")")" 18)"
+    tool="$(rule_tool "$(jq -c '.rule' <<<"$entry")")"
     [ -z "$tool" ] && tool="-"
-    match_sum="$(truncate_str "$(match_summary "$(jq -c '.rule' <<<"$entry")")" 40)"
+    match_sum="$(match_summary "$(jq -c '.rule' <<<"$entry")")"
     reason="$(rule_reason "$(jq -c '.rule' <<<"$entry")")"
+
+    wrap_text "$match_sum" "$W_match" match_lines
+    wrap_text "$reason" "$W_reason" reason_lines
+
+    max_lines=${#match_lines[@]}
+    [ "${#reason_lines[@]}" -gt "$max_lines" ] && max_lines=${#reason_lines[@]}
+
     if [ "$use_color" -eq 1 ]; then
       color="$(color_for_list "$list")"
-      printf "${color}%-8s %-6s %-9s %4s  %-18s %-40s %s${reset}\n" \
-        "$scope" "$list" "$source" "$idx" "$tool" "$match_sum" "$reason"
     else
-      printf '%-8s %-6s %-9s %4s  %-18s %-40s %s\n' \
-        "$scope" "$list" "$source" "$idx" "$tool" "$match_sum" "$reason"
+      color=""
     fi
+
+    # Wrap tool only on the first line; padding on continuations.
+    printf -v pad_tool '%*s' "$W_tool" ''
+
+    for ((li = 0; li < max_lines; li++)); do
+      msum_line="${match_lines[$li]:-}"
+      reason_line="${reason_lines[$li]:-}"
+      if [ "$li" -eq 0 ]; then
+        if [ "$use_color" -eq 1 ]; then
+          printf "${color}%-8s %-6s %-9s %4s  %-${W_tool}s %-${W_match}s %s${reset}\n" \
+            "$scope" "$list" "$source" "$idx" "$tool" "$msum_line" "$reason_line"
+        else
+          printf "%-8s %-6s %-9s %4s  %-${W_tool}s %-${W_match}s %s\n" \
+            "$scope" "$list" "$source" "$idx" "$tool" "$msum_line" "$reason_line"
+        fi
+      else
+        # Continuation line: pad scope/list/source/#/tool with spaces so the
+        # wrapped tail sits under its column.
+        if [ "$use_color" -eq 1 ]; then
+          printf "${color}%-8s %-6s %-9s %4s  %s %-${W_match}s %s${reset}\n" \
+            '' '' '' '' "$pad_tool" "$msum_line" "$reason_line"
+        else
+          printf "%-8s %-6s %-9s %4s  %s %-${W_match}s %s\n" \
+            '' '' '' '' "$pad_tool" "$msum_line" "$reason_line"
+        fi
+      fi
+    done
   done
 }
 
+# Column layout for the grouped renderer:
+#   #(4) tool(W_tool) match-summary(W_match) reason(rest)
+# Lead columns (before match) consume 4 + 2 + W_tool + 1 chars.
 render_grouped_table() {
   local use_color=0
   tty_color && use_color=1
   local reset=""
   [ "$use_color" -eq 1 ] && reset='\033[0m'
+
+  local total
+  total="$(term_width)"
 
   # Collect unique (scope, list, source) group keys in first-seen order.
   # Using jq to compute a stable set of tuples preserving the ANNOTATED order.
@@ -402,24 +547,73 @@ render_grouped_table() {
       "$(printf '%s' "$scope" | tr '[:lower:]' '[:upper:]')" \
       "$list" "$source" "$mcount"
 
-    printf '%4s  %-18s %-50s %s\n' '#' 'tool' 'match-summary' 'reason'
+    # Per-group column budget.
+    local widest_tool=4 t_len mi mentry mtool
+    for ((mi = 0; mi < mcount; mi++)); do
+      mentry="$(jq -c ".[${mi}]" <<<"$members")"
+      mtool="$(rule_tool "$(jq -c '.rule' <<<"$mentry")")"
+      [ -z "$mtool" ] && mtool="-"
+      t_len=${#mtool}
+      [ "$t_len" -gt "$widest_tool" ] && widest_tool="$t_len"
+    done
+    local W_tool=$widest_tool
+    [ "$W_tool" -lt 12 ] && W_tool=12
+    [ "$W_tool" -gt 20 ] && W_tool=20
 
-    local mi mentry midx mtool msum mreason
+    # Fixed lead consumes: 4 (#) + 2 (gap) + W_tool + 1 (gap) = 7 + W_tool.
+    local fixed=$(( 7 + W_tool ))
+    local remaining=$(( total - fixed ))
+    [ "$remaining" -lt 50 ] && remaining=50
+    local W_match=$(( remaining * 60 / 100 ))
+    local W_reason=$(( remaining - W_match - 1 ))
+    [ "$W_match" -lt 30 ] && W_match=30
+    [ "$W_reason" -lt 20 ] && W_reason=20
+
+    printf "%4s  %-${W_tool}s %-${W_match}s %s\n" '#' 'tool' 'match-summary' 'reason'
+
+    local midx msum mreason match_lines=() reason_lines=() max_lines li msum_line reason_line pad_tool
+    printf -v pad_tool '%*s' "$W_tool" ''
     for ((mi = 0; mi < mcount; mi++)); do
       mentry="$(jq -c ".[${mi}]" <<<"$members")"
       midx="$(jq -r '.index' <<<"$mentry")"
-      mtool="$(truncate_str "$(rule_tool "$(jq -c '.rule' <<<"$mentry")")" 18)"
+      mtool="$(rule_tool "$(jq -c '.rule' <<<"$mentry")")"
       [ -z "$mtool" ] && mtool="-"
-      msum="$(truncate_str "$(match_summary "$(jq -c '.rule' <<<"$mentry")")" 50)"
+      msum="$(match_summary "$(jq -c '.rule' <<<"$mentry")")"
       mreason="$(rule_reason "$(jq -c '.rule' <<<"$mentry")")"
+
+      wrap_text "$msum" "$W_match" match_lines
+      wrap_text "$mreason" "$W_reason" reason_lines
+
+      max_lines=${#match_lines[@]}
+      [ "${#reason_lines[@]}" -gt "$max_lines" ] && max_lines=${#reason_lines[@]}
+
       if [ "$use_color" -eq 1 ]; then
         color="$(color_for_list "$list")"
-        printf "${color}%4s  %-18s %-50s %s${reset}\n" \
-          "$midx" "$mtool" "$msum" "$mreason"
       else
-        printf '%4s  %-18s %-50s %s\n' \
-          "$midx" "$mtool" "$msum" "$mreason"
+        color=""
       fi
+
+      for ((li = 0; li < max_lines; li++)); do
+        msum_line="${match_lines[$li]:-}"
+        reason_line="${reason_lines[$li]:-}"
+        if [ "$li" -eq 0 ]; then
+          if [ "$use_color" -eq 1 ]; then
+            printf "${color}%4s  %-${W_tool}s %-${W_match}s %s${reset}\n" \
+              "$midx" "$mtool" "$msum_line" "$reason_line"
+          else
+            printf "%4s  %-${W_tool}s %-${W_match}s %s\n" \
+              "$midx" "$mtool" "$msum_line" "$reason_line"
+          fi
+        else
+          if [ "$use_color" -eq 1 ]; then
+            printf "${color}%4s  %s %-${W_match}s %s${reset}\n" \
+              '' "$pad_tool" "$msum_line" "$reason_line"
+          else
+            printf "%4s  %s %-${W_match}s %s\n" \
+              '' "$pad_tool" "$msum_line" "$reason_line"
+          fi
+        fi
+      done
     done
   done
 }

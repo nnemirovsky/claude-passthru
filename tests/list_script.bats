@@ -389,7 +389,7 @@ EOF
   [[ "$output" == *"whole mcp"* ]]
 }
 
-@test "list: long match value is truncated with an ellipsis" {
+@test "list: long match value is printed in full, wrapped across multiple lines, never truncated" {
   # Fixture with a very long match value.
   local longcmd
   longcmd="^this_is_a_very_long_regex_pattern_that_should_exceed_the_fifty_character_truncation_boundary_by_a_clear_margin"
@@ -398,12 +398,93 @@ EOF
     allow: [{ tool: "Bash", match: { command: $lc }, reason: "too long" }],
     deny: []
   }' > "$USER_ROOT/.claude/passthru.json"
-  run_list
+  # Fix width so wrapping is deterministic.
+  COLUMNS=120 run_list
   [ "$status" -eq 0 ]
-  # Ellipsis present in the match summary column.
-  [[ "$output" == *"..."* ]]
-  # Full 100-char command is NOT in output.
-  [[ "$output" != *"$longcmd"* ]]
+  # No ellipsis anywhere in the table output. Truncation is gone.
+  [[ "$output" != *"..."* ]]
+  # Start of the regex appears on the first wrapped line.
+  [[ "$output" == *"this_is_a_very_long_regex_pattern"* ]]
+  # The tail of the regex that the old truncation used to drop is now
+  # present verbatim on a continuation line.
+  [[ "$output" == *"boundary_by_a_clear_margin"* ]]
+  # Output should span multiple lines for this row (i.e. at least one
+  # continuation line exists).
+  local n_lines
+  n_lines="$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
+  [ "$n_lines" -ge 4 ]  # header + column row + >= 2 wrapped lines
+}
+
+@test "list: continuation lines pad the # and tool columns with spaces (column alignment)" {
+  # A row whose match-summary wraps yields continuation lines whose leading
+  # characters (covering #, tool columns) are all spaces.
+  local longcmd
+  longcmd="^pattern_one|^pattern_two|^pattern_three|^pattern_four|^pattern_five|^pattern_six|^pattern_seven"
+  jq -n --arg lc "$longcmd" '{
+    version: 1,
+    allow: [{ tool: "Bash", match: { command: $lc }, reason: "wrap" }],
+    deny: []
+  }' > "$USER_ROOT/.claude/passthru.json"
+  COLUMNS=100 run_list
+  [ "$status" -eq 0 ]
+  # Find a line that starts with "   1  Bash" (first line of the wrapped row).
+  local first_line
+  first_line="$(printf '%s\n' "$output" | grep -n -E '^   1  Bash' | head -1 | cut -d: -f1)"
+  [ -n "$first_line" ]
+  # The next line should be a continuation: begins with whitespace only for
+  # the # + tool columns (no digit, no tool name). It should also contain
+  # another fragment of the pattern text.
+  local next_line
+  next_line="$(printf '%s\n' "$output" | sed -n "$((first_line + 1))p")"
+  [ -n "$next_line" ]
+  # First 18+ characters (# + padding + tool padding) must be spaces.
+  [[ "$next_line" =~ ^[[:space:]]{10,}[^[:space:]] ]]
+  # It must NOT begin with "   2  " (another row index).
+  [[ ! "$next_line" =~ ^\ +[0-9]+\ +[A-Za-z] ]]
+}
+
+@test "list: --flat continuation lines pad scope/list/source/#/tool columns" {
+  # Same long pattern, but with the flat renderer. Continuation lines should
+  # leave the leading scope/list/source/#/tool columns blank.
+  local longcmd
+  longcmd="^pattern_alpha|^pattern_beta|^pattern_gamma|^pattern_delta|^pattern_epsilon|^pattern_zeta|^pattern_eta"
+  jq -n --arg lc "$longcmd" '{
+    version: 1,
+    allow: [{ tool: "Bash", match: { command: $lc }, reason: "wrap" }],
+    deny: []
+  }' > "$USER_ROOT/.claude/passthru.json"
+  COLUMNS=120 run_list --flat
+  [ "$status" -eq 0 ]
+  # The first data row begins with "user " on column 0.
+  local first_line
+  first_line="$(printf '%s\n' "$output" | grep -n -E '^user[[:space:]]+allow' | head -1 | cut -d: -f1)"
+  [ -n "$first_line" ]
+  # Next line: continuation must start with whitespace (no "user", no "allow").
+  local next_line
+  next_line="$(printf '%s\n' "$output" | sed -n "$((first_line + 1))p")"
+  [ -n "$next_line" ]
+  [[ "$next_line" =~ ^[[:space:]]{20,} ]]
+  [[ ! "$next_line" == user* ]]
+  [[ ! "$next_line" == project* ]]
+}
+
+@test "list: extremely narrow terminal still prints full regex, never drops chars" {
+  local longcmd
+  longcmd="^abcdefghijklmnopqrstuvwxyz0123456789_abcdefghijklmnopqrstuvwxyz"
+  jq -n --arg lc "$longcmd" '{
+    version: 1,
+    allow: [{ tool: "Bash", match: { command: $lc }, reason: "narrow" }],
+    deny: []
+  }' > "$USER_ROOT/.claude/passthru.json"
+  COLUMNS=40 run_list
+  [ "$status" -eq 0 ]
+  # The tail of the regex (what the old truncation used to drop) is
+  # present somewhere in the wrapped output.
+  [[ "$output" == *"nopqrstuvwxyz"* ]]
+  # The opening anchor of the regex is present at the start of the row.
+  [[ "$output" == *"^abcdefghijkl"* ]]
+  # No truncation indicator leaked into output.
+  [[ "$output" != *"..."* ]]
 }
 
 # ---------------------------------------------------------------------------
