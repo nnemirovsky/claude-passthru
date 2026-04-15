@@ -46,6 +46,8 @@ All commands are plugin-namespaced under `/passthru:`.
 | `/passthru:bootstrap` | One-shot importer: reviews your existing `permissions.allow` entries, shows the proposed rules, asks to confirm, then writes `passthru.imported.json`. Runs the verifier afterwards. |
 | `/passthru:add` | Add a rule without hand-editing `passthru.json`. Supports `--deny` and `--field`. |
 | `/passthru:suggest` | Propose a generalized rule from a recent tool call in the conversation, then write it on confirmation. |
+| `/passthru:list` | Show every rule across user and project scopes, grouped by `(scope, list, source)` with 1-based indexes. Filter by `--scope`, `--list`, `--source`, or `--tool`. |
+| `/passthru:remove` | Remove an authored rule by `<scope> <list> <index>`. Indexes match the numbering from `/passthru:list`. Imported (bootstrap-generated) rules are not removable here; edit `settings.json` and re-run bootstrap instead. |
 | `/passthru:verify` | Validate every rule file. Surfaces parse errors, schema violations, invalid regex, duplicates, and allow/deny conflicts. |
 | `/passthru:log` | Read the audit log with filters. Also toggles the audit sentinel on/off. |
 
@@ -194,6 +196,30 @@ Propose a generalized rule from a recent tool call in the conversation. The comm
 ```
 /passthru:suggest gh api
 ```
+
+### `/passthru:list`
+
+Show every rule across user and project scopes. Rules are grouped by `(scope, list, source)` and numbered with 1-based indexes that match what `/passthru:remove` expects.
+
+```
+/passthru:list
+/passthru:list --scope user --list deny
+/passthru:list --source imported
+/passthru:list --tool '^Bash$'
+/passthru:list --flat
+/passthru:list --format json
+```
+
+### `/passthru:remove`
+
+Remove an authored rule by `<scope> <list> <index>`. Run `/passthru:list` first to see the indexes.
+
+```
+/passthru:remove user allow 3
+/passthru:remove project deny 1
+```
+
+Imported rules (written by `/passthru:bootstrap`) are not removable here because bootstrap regenerates them on every run. To drop one, remove the corresponding `permissions.allow` entry from `settings.json` and re-run bootstrap.
 
 ### `/passthru:verify`
 
