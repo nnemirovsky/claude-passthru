@@ -374,7 +374,9 @@ wrap_text() {
   done
   # Text was originally empty; emit one empty cell.
   local __wrap_len
-  eval "__wrap_len=\${#$arr_name[@]}"
+  # Use braces around the variable name so shellcheck sees this as a variable,
+  # not an array index expansion: ${name}[@] -> ${<resolved>}[@] -> array ref.
+  eval "__wrap_len=\${#${arr_name}[@]}"
   if [ "$__wrap_len" -eq 0 ]; then
     eval "$arr_name+=('')"
   fi
