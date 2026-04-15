@@ -103,6 +103,20 @@ bash .../scripts/bootstrap.sh --write
 
 `--write` mode also runs `scripts/verify.sh --quiet` after writing. If the verifier finds errors, the script restores the pre-write backup and exits non-zero.
 
+**What bootstrap converts.** Six native rule shapes are recognized:
+
+| Native rule | Converted to |
+| --- | --- |
+| `Bash(<prefix>:*)` | `{"tool": "Bash", "match": {"command": "^<prefix>(\\s|$)"}}` |
+| `Bash(<exact command>)` | `{"tool": "Bash", "match": {"command": "^<exact>$"}}` |
+| `mcp__server__tool` | `{"tool": "^mcp__server__tool$"}` |
+| `WebFetch(domain:x.com)` | `{"tool": "WebFetch", "match": {"url": "^https?://([^/.]+\\.)*x\\.com([/:?#]\|$)"}}` |
+| `WebSearch` | `{"tool": "^WebSearch$"}` |
+| `Read(<path>)`, `Edit(<path>)`, `Write(<path>)` | `{"tool": "^Read$", "match": {"file_path": "^<path>$"}}` (exact) or `"^<path>(/\|$)"` when the native rule ends in `/**` or `/*` |
+| `Skill(<name>)` | `{"tool": "^Skill$", "match": {"skill": "^<name>$"}}` |
+
+Regex metacharacters in the original path/prefix/name are escaped so the converted pattern matches literally. Anything that does not match one of the shapes above is skipped with a `[WARN]` line on stderr (for example, custom MCP tool patterns that do not start with `mcp__`, or a `WebFetch(...)` with a non-`domain:` argument).
+
 Bootstrap writes to dedicated imported files so hand-curated rules in `passthru.json` stay separate:
 
 * `~/.claude/passthru.imported.json` (user scope)

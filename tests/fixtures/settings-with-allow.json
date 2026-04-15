@@ -12,7 +12,12 @@
       "WebFetch(domain:docs.anthropic.com)",
       "WebFetch(domain:x.com)",
       "Bash(npm run test:unit)",
-      "Read(/tmp/foo)",
+      "WebSearch",
+      "Read(/private/tmp/ios-webkit-debug-proxy/**)",
+      "Read(/etc/hosts)",
+      "Edit(/var/log/app.log)",
+      "Write(/tmp/out/**)",
+      "Skill(revdiff)",
       "ExactStrangeFormat"
     ]
   }
