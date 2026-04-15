@@ -684,7 +684,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Read/Edit/Write skip cases that mirror Claude Code's own rejection rules.
+# Read/Edit/Write skip cases for clearly invalid path shapes.
 # ---------------------------------------------------------------------------
 
 @test "bootstrap: Read(~user/.ssh) skipped (tilde variant not supported)" {

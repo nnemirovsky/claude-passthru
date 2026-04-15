@@ -172,7 +172,7 @@ teardown() {
 
 # Directory-prefix regex: the core motivating example from the plan - matches a bash
 # sub-argument path that native `Bash(prefix:*)` rules cannot express due to the
-# word-boundary check in src/tools/BashTool/bashPermissions.ts.
+# word-boundary check matching how native Bash permission prefixes behave.
 @test "match_rule: directory-prefix regex matches bash subcommand paths" {
   rule='{"tool":"Bash","match":{"command":"^bash /Users/[^/]+/\\.claude/plugins/.*/scripts/[a-z-]+\\.sh( |$)"}}'
   run match_rule "Bash" '{"command":"bash /Users/alice/.claude/plugins/cache/org-claude-passthru/scripts/verify.sh --quiet"}' "$rule"
