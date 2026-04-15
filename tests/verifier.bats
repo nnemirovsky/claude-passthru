@@ -222,6 +222,205 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Schema v2: ask[] array
+# ---------------------------------------------------------------------------
+
+@test "schema v2: version 2 with ask[] is accepted" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [],
+  "ask": [{"tool":"WebFetch","match":{"url":"^https?://"}}]
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]"* ]]
+}
+
+@test "schema v2: malformed ask rule (no tool, no match) -> error names ask list" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [{"reason":"broken"}]
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"schema"* ]]
+  # Path must point into .ask[0] so the user knows which array to fix.
+  [[ "$output" == *".ask[0]"* ]]
+}
+
+@test "schema v2: invalid regex in ask[] tool -> error names ask list" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [{"tool":"[","reason":"bad regex"}]
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"regex"* ]]
+  [[ "$output" == *".ask[0]"* ]]
+}
+
+@test "schema v2: unsupported version (v3) -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{"version":3,"allow":[],"deny":[]}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"version"* ]]
+}
+
+@test "schema v1: ask[] key in v1 file is ignored (not validated as rules)" {
+  # A v1 file that carries ask[] would trigger schema errors if validated,
+  # but verify.sh drops ask[] on v1 (single source of truth with load_rules).
+  # This keeps partial migrations from failing the verifier loudly.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 1,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [],
+  "ask": [{"reason":"would fail schema if validated"}]
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Check 5 triad: conflict across (allow, ask, deny)
+# ---------------------------------------------------------------------------
+
+@test "check 5 triad: conflict between ask[] and allow[] -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [],
+  "ask": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"conflict"* ]]
+  # Message must mention both lists so the user can locate the conflict.
+  [[ "$output" == *"allow"* ]]
+  [[ "$output" == *"ask"* ]]
+}
+
+@test "check 5 triad: conflict between ask[] and deny[] -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "ask": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"conflict"* ]]
+  [[ "$output" == *"ask"* ]]
+  [[ "$output" == *"deny"* ]]
+}
+
+@test "check 5 triad: cross-scope conflict ask (user) + deny (project) -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  cat > "$PROJ_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"conflict"* ]]
+}
+
+@test "check 5 triad: same rule in all three lists -> single conflict error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "ask": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"conflict"* ]]
+}
+
+@test "check 5 triad: duplicate within ask[] in two scopes -> warn (plain duplicate)" {
+  # Both scopes declare the same ask rule. This is a duplicate, not a conflict
+  # (same list name on both sides).
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  cat > "$PROJ_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [{"tool":"Bash","match":{"command":"^ls"}}]
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"duplicate"* ]]
+  # Not a conflict.
+  if printf '%s' "$output" | grep -q 'conflict'; then
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Check 6 shadowing: ask[] array
+# ---------------------------------------------------------------------------
+
+@test "check 6 shadowing: duplicate within ask[] -> warn" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [
+    {"tool":"Bash","match":{"command":"^gh api"},"reason":"first"},
+    {"tool":"Bash","match":{"command":"^gh api"},"reason":"shadowed"}
+  ]
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"shadowing:"* ]]
+  # The shadowing message must reference the ask list.
+  [[ "$output" == *"ask"* ]]
+  [[ "$output" =~ rule\ [0-9]+\ shadowed\ by ]]
+}
+
+# ---------------------------------------------------------------------------
 # Flags
 # ---------------------------------------------------------------------------
 

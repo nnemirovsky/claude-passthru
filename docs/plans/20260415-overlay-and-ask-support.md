@@ -356,12 +356,12 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `tests/verifier.bats` (ask[] schema + conflict tests)
 - Modify: `docs/rule-format.md` (document v2 + ask array + decision:ask flow)
 
-- [ ] extend `validate_rules` to accept `version: 1` OR `version: 2`. For v2, validate optional `ask[]` using the same rule-shape validation as allow/deny
-- [ ] extend `load_rules` output to include ask rules (alongside allow/deny arrays in merged output)
-- [ ] extend `scripts/verify.sh` check 5 (deny/allow conflict) to cover (allow, ask, deny) triad - same rule in two of the three is an error
-- [ ] extend check 6 (shadowing) to cover ask[] arrays
-- [ ] add bats: v1 file still loads as before; v2 file with ask[] loads; v2 file with malformed ask[] entry fails validation; conflict between ask + allow -> error; conflict between ask + deny -> error; version 3 -> error
-- [ ] run full suite
+- [x] extend `validate_rules` to accept `version: 1` OR `version: 2`. For v2, validate optional `ask[]` using the same rule-shape validation as allow/deny
+- [x] extend `load_rules` output to include ask rules (alongside allow/deny arrays in merged output)
+- [x] extend `scripts/verify.sh` check 5 (deny/allow conflict) to cover (allow, ask, deny) triad - same rule in two of the three is an error
+- [x] extend check 6 (shadowing) to cover ask[] arrays
+- [x] add bats: v1 file still loads as before; v2 file with ask[] loads; v2 file with malformed ask[] entry fails validation; conflict between ask + allow -> error; conflict between ask + deny -> error; version 3 -> error
+- [x] run full suite
 
 ### Task 4: write-rule.sh + /passthru:add support for ask
 

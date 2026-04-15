@@ -612,10 +612,16 @@ passthru_project_imported_path() {
 # Malformed JSON fails with the offending path on stderr and non-zero return.
 #
 # Output: a single merged JSON object on stdout of the form
-#   { "version": 1, "allow": [...], "deny": [...] }
-# where allow[] and deny[] are concatenated in this fixed order:
+#   { "version": 2, "allow": [...], "deny": [...], "ask": [...] }
+# where allow[], deny[], and ask[] are concatenated in this fixed order:
 #   user-authored, user-imported, project-authored, project-imported.
 # Ordering matters for shadowing reports and for first-match semantics.
+#
+# Schema v1 files contribute no ask[] entries (the ask[] key is v2-only).
+# Schema v2 files may declare an ask[] array at the top level; v1 files
+# that happen to contain ask[] have it ignored here (load_rules reads
+# allow[] and deny[] only for v1). The merged document always emits
+# version 2 because it is a strict superset of v1.
 load_rules() {
   local files=()
   local p
@@ -630,7 +636,9 @@ load_rules() {
   done
 
   # Normalize each file: missing/empty -> {}, malformed -> error.
-  # Each element becomes a JSON object with .allow[] and .deny[] (possibly empty).
+  # Each element becomes a JSON object with .allow[], .deny[], and .ask[]
+  # (possibly empty). For v1 files, .ask[] is always dropped to empty so
+  # downstream consumers never see ask rules from v1 sources.
   local tmpdir
   tmpdir="$(mktemp -d -t passthru-load.XXXXXX)" || return 1
   # shellcheck disable=SC2064
@@ -650,19 +658,28 @@ load_rules() {
       printf '[ERR] failed to parse %s: %s\n' "$f" "$(cat "${tmpdir}/err")" >&2
       return 2
     fi
-    # Normalize: ensure .allow and .deny exist as arrays.
-    if ! jq '{ version: (.version // 1), allow: (.allow // []), deny: (.deny // []) }' \
-        "$f" > "${tmpdir}/${idx}.json" 2>"${tmpdir}/err"; then
+    # Normalize: ensure .allow, .deny, and .ask exist as arrays.
+    # For v1 files, .ask is always reset to [] since ask[] is a v2-only key.
+    if ! jq '
+      . as $d
+      | (.version // 1) as $v
+      | {
+          version: $v,
+          allow: (.allow // []),
+          deny: (.deny // []),
+          ask: (if $v >= 2 then (.ask // []) else [] end)
+        }
+    ' "$f" > "${tmpdir}/${idx}.json" 2>"${tmpdir}/err"; then
       printf '[ERR] failed to normalize %s: %s\n' "$f" "$(cat "${tmpdir}/err")" >&2
       return 2
     fi
     idx=$((idx + 1))
   done
 
-  # Merge: concat allow[] and deny[] across all inputs, preserve order.
+  # Merge: concat allow[], deny[], and ask[] across all inputs, preserve order.
   # If no files at all, emit empty skeleton.
   if [ "$idx" -eq 0 ]; then
-    printf '{"version":1,"allow":[],"deny":[]}\n'
+    printf '{"version":2,"allow":[],"deny":[],"ask":[]}\n'
     return 0
   fi
 
@@ -673,9 +690,10 @@ load_rules() {
   done
 
   jq -s '{
-    version: 1,
+    version: 2,
     allow: ([.[].allow // []] | add),
-    deny: ([.[].deny // []] | add)
+    deny: ([.[].deny // []] | add),
+    ask: ([.[].ask // []] | add)
   }' "${inputs[@]}"
 }
 
@@ -685,13 +703,20 @@ load_rules() {
 #
 # Usage: validate_rules <merged-json>
 # Enforces:
-#   - top-level .version is 1 (if present, must be 1; absent = ok, merged output always sets 1)
+#   - top-level .version is 1 or 2 (absent = ok, merged output always sets 2)
 #   - .allow and .deny are arrays (possibly empty)
+#   - on v2 only, .ask is an array (possibly empty)
 #   - each rule object has at least one of "tool" or "match"
 #   - if present, .tool is a non-empty string
 #   - if present, .match is an object and every value is a non-empty string
 # Does NOT compile-check PCRE at load time (per plan: deep regex checks live in verify.sh).
 # Returns 0 if valid, nonzero with stderr message otherwise.
+#
+# Schema evolution: v1 files may still be in the wild. load_rules always emits
+# v2 (since v2 is a strict superset), so validate_rules on loader output always
+# sees version 2. When called on a raw v1 source file, validate_rules ignores
+# any ask[] key (v1 does not recognize it). On v2, ask[] is validated using
+# the same rule-shape validation as allow[] and deny[].
 validate_rules() {
   local merged="$1"
   if [ -z "$merged" ]; then
@@ -699,11 +724,11 @@ validate_rules() {
     return 2
   fi
 
-  # Version check: if .version is present and not 1, reject.
+  # Version check: accept 1 or 2; reject anything else.
   local ver
   ver="$(jq -r '.version // 1' <<<"$merged" 2>/dev/null)"
-  if [ "$ver" != "1" ]; then
-    printf '[ERR] unsupported rule schema version: %s (expected 1)\n' "$ver" >&2
+  if [ "$ver" != "1" ] && [ "$ver" != "2" ]; then
+    printf '[ERR] unsupported rule schema version: %s (expected 1 or 2)\n' "$ver" >&2
     return 2
   fi
 
@@ -721,9 +746,21 @@ validate_rules() {
     return 2
   fi
 
-  # Per-rule schema checks for both arrays.
+  # On v2, also ensure .ask (if present) is an array.
+  if [ "$ver" = "2" ]; then
+    local ask_type
+    ask_type="$(jq -r '.ask | type' <<<"$merged" 2>/dev/null)"
+    if [ "$ask_type" != "array" ] && [ "$ask_type" != "null" ]; then
+      printf '[ERR] .ask must be an array, got %s\n' "$ask_type" >&2
+      return 2
+    fi
+  fi
+
+  # Per-rule schema checks for allow[], deny[], and (on v2) ask[].
+  # We pass the version as a jq arg so the same filter handles both schemas:
+  # v2 walks ask[] too, v1 never does.
   local report
-  report="$(jq -r '
+  report="$(jq -r --arg ver "$ver" '
     def check_rule(list_name):
       . as $entry
       | $entry.key as $i
@@ -752,7 +789,10 @@ validate_rules() {
          else empty end);
 
     ( (.allow // []) | to_entries[] | check_rule("allow") ),
-    ( (.deny  // []) | to_entries[] | check_rule("deny") )
+    ( (.deny  // []) | to_entries[] | check_rule("deny") ),
+    ( if $ver == "2" then
+        ( (.ask // []) | to_entries[] | check_rule("ask") )
+      else empty end )
   ' <<<"$merged" 2>/dev/null)"
 
   # jq's `to_entries` numbering requires capturing index; the construction above

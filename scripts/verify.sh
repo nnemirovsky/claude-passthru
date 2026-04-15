@@ -8,12 +8,13 @@
 #
 # Checks (across the merged set):
 #   1. parse      - every existing file parses as JSON.
-#   2. schema     - each rule has `tool` or `match`; types match spec; version: 1.
+#   2. schema     - each rule has `tool` or `match`; types match spec;
+#                   version is 1 or 2. On v2, .ask[] is validated too.
 #   3. regex      - every `tool` regex and every `match.*` regex compiles in perl.
 #   4. duplicates - exact-duplicate rules (same tool + match) across scopes -> warn.
-#   5. conflict   - identical tool + match in both allow[] and deny[] -> error.
-#   6. shadowing  - within one post-merge allow[] or deny[] array, index j<i with
-#                   identical tool+match as index i -> warn.
+#   5. conflict   - identical tool + match in two of (allow[], deny[], ask[]) -> error.
+#   6. shadowing  - within one post-merge allow[], deny[], or ask[] array,
+#                   index j<i with identical tool+match as index i -> warn.
 #
 # Flags:
 #   --strict          warnings also trigger non-zero exit (exit 2 instead of 0).
@@ -175,7 +176,7 @@ for f in "${EXISTING[@]}"; do
   if [ ! -s "$f" ]; then
     # Empty file -> treat as {}.
     PARSED_FILES+=("$f")
-    PARSED_JSON+=('{"version":1,"allow":[],"deny":[]}')
+    PARSED_JSON+=('{"version":1,"allow":[],"deny":[],"ask":[]}')
     continue
   fi
   jq_err=""
@@ -183,7 +184,19 @@ for f in "${EXISTING[@]}"; do
     diag error "$f" "" "" "parse: $jq_err"
     continue
   fi
-  normalized="$(jq -c '{version:(.version // 1), allow:(.allow // []), deny:(.deny // [])}' "$f" 2>/dev/null || echo '')"
+  # Normalize: always materialize allow[], deny[], ask[] so downstream checks
+  # do not branch on schema version. For v1 files, ask[] is forced to [] since
+  # the key is v2-only. For v2 files, ask[] is read as-is (or [] if absent).
+  normalized="$(jq -c '
+    . as $d
+    | (.version // 1) as $v
+    | {
+        version: $v,
+        allow: (.allow // []),
+        deny: (.deny // []),
+        ask: (if $v >= 2 then (.ask // []) else [] end)
+      }
+  ' "$f" 2>/dev/null || echo '')"
   if [ -z "$normalized" ]; then
     diag error "$f" "" "" "parse: normalization failed"
     continue
@@ -284,12 +297,12 @@ for ((fi = 0; fi < ${#PARSED_FILES[@]}; fi++)); do
   file="${PARSED_FILES[$fi]}"
   normalized="${PARSED_JSON[$fi]}"
 
-  # Version check: if original file had .version and it's not 1, fail.
+  # Version check: accept 1 or 2; reject anything else.
   # Empty files are normalized to version 1 by PARSED_JSON above, so read from
   # the normalized JSON rather than the raw file.
   ver="$(jq -r '.version // 1' <<<"$normalized")"
-  if [ "$ver" != "1" ]; then
-    diag error "$file" ".version" "" "schema: unsupported version $ver (expected 1)"
+  if [ "$ver" != "1" ] && [ "$ver" != "2" ]; then
+    diag error "$file" ".version" "" "schema: unsupported version $ver (expected 1 or 2)"
   fi
 
   # Allow[] rules.
@@ -307,11 +320,19 @@ for ((fi = 0; fi < ${#PARSED_FILES[@]}; fi++)); do
     check_rule "$file" "deny" "$rule" "$i"
     TOTAL_RULES=$((TOTAL_RULES + 1))
   done
+
+  # Ask[] rules (v2 only; for v1 files, normalization above always yields []).
+  n_ask="$(jq -r '.ask | length' <<<"$normalized")"
+  for ((i = 0; i < n_ask; i++)); do
+    rule="$(jq -c ".ask[$i]" <<<"$normalized")"
+    check_rule "$file" "ask" "$rule" "$i"
+    TOTAL_RULES=$((TOTAL_RULES + 1))
+  done
 done
 
 # ---------------------------------------------------------------------------
 # Check 4: duplicates (across scopes)
-# Check 5: deny/allow conflict (across scopes)
+# Check 5: conflict across (allow, ask, deny) triad (across scopes)
 # Check 6: shadowing (within merged list)
 # ---------------------------------------------------------------------------
 #
@@ -320,9 +341,10 @@ done
 # key-sort walk.
 #
 # We compute everything in a single `jq -s` invocation that consumes a JSON
-# array of {file, list, index, canon, allow_chunk, deny_chunk} records and
-# emits the merged allow[]/deny[] arrays plus the duplicate/conflict groups.
-# This replaces ~80 lines of bash sort + flush_group + per-file merge loops.
+# array of {file, list, index, canon, allow_chunk, deny_chunk, ask_chunk}
+# records and emits the merged allow[]/deny[]/ask[] arrays plus the duplicate
+# / conflict groups. This replaces ~80 lines of bash sort + flush_group +
+# per-file merge loops.
 
 canon_rule() {
   # stdin rule JSON -> stdout canonical identity string.
@@ -346,7 +368,8 @@ if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
   # Single pipeline computes:
   #   .duplicates : array of {canon, occurrences:[{file,list,index},...]}
   #                 with len > 1 (group_by(canon))
-  #   .merged_allow / .merged_deny : concatenated lists (file order, then index)
+  #   .merged_allow / .merged_deny / .merged_ask : concatenated lists
+  #     (file order, then index)
   GROUP_REPORT="$(jq -c "
     def canon: ${PASSTHRU_CANON_JQ} | tojson;
 "'    . as $files
@@ -358,6 +381,9 @@ if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
           + ([range(0; ($files[$fi].doc.deny | length)) as $i
             | { file: $files[$fi].file, list: "deny", index: $i,
                 rule: ($files[$fi].doc.deny[$i]) }])
+          + ([range(0; (($files[$fi].doc.ask // []) | length)) as $i
+            | { file: $files[$fi].file, list: "ask", index: $i,
+                rule: (($files[$fi].doc.ask // [])[$i]) }])
         )
       ) as $tuples
     | {
@@ -371,21 +397,24 @@ if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
         merged_allow:
           ($files | map(.doc.allow) | add // []),
         merged_deny:
-          ($files | map(.doc.deny) | add // [])
+          ($files | map(.doc.deny) | add // []),
+        merged_ask:
+          ($files | map(.doc.ask // []) | add // [])
       }
   ' <<<"$PER_FILE_INPUTS")"
 
-  # Walk the duplicate groups: classify each as conflict (allow + deny) or
-  # plain duplicate (same list, multiple times).
+  # Walk the duplicate groups. A group conflicts when it spans two or more of
+  # the (allow, ask, deny) triad. Otherwise it is a plain duplicate (same list
+  # appearing in multiple files, or one list repeated within a single file).
   while IFS= read -r group; do
     [ -z "$group" ] && continue
-    has_allow="$(jq -r '.occurrences | map(select(.list == "allow")) | length > 0' <<<"$group")"
-    has_deny="$(jq -r '.occurrences | map(select(.list == "deny")) | length > 0' <<<"$group")"
+    lists_present="$(jq -r '.occurrences | map(.list) | unique | length' <<<"$group")"
     summary="$(jq -r '.occurrences | map("\(.file)#\(.list)") | join(", ")' <<<"$group")"
     first_file="$(jq -r '.occurrences[0].file' <<<"$group")"
-    if [ "$has_allow" = "true" ] && [ "$has_deny" = "true" ]; then
+    if [ "$lists_present" -ge 2 ]; then
+      lists_str="$(jq -r '.occurrences | map(.list) | unique | join(" and ")' <<<"$group")"
       diag error "$first_file" "" "" \
-        "conflict: same tool+match appears in both allow and deny ($summary)"
+        "conflict: same tool+match appears in ${lists_str} ($summary)"
     else
       diag warn "$first_file" "" "" \
         "duplicate: same rule identity appears in multiple places ($summary)"
@@ -394,7 +423,7 @@ if [ "${#PARSED_FILES[@]}" -gt 0 ]; then
 fi
 
 # Check 6: shadowing within the merged list. Reuses the merged_allow /
-# merged_deny arrays we just built (zero extra jq forks per file).
+# merged_deny / merged_ask arrays we just built (zero extra jq forks per file).
 check_shadowing_in_list() {
   # $1 = list name (for message), $2 = merged JSON array
   # Build canonical identity strings for every entry once (one jq fork per
@@ -425,8 +454,10 @@ check_shadowing_in_list() {
 if [ "${#PARSED_FILES[@]}" -gt 0 ] && [ -n "${GROUP_REPORT:-}" ]; then
   merged_allow="$(jq -c '.merged_allow' <<<"$GROUP_REPORT")"
   merged_deny="$(jq -c '.merged_deny'  <<<"$GROUP_REPORT")"
+  merged_ask="$(jq -c '.merged_ask'   <<<"$GROUP_REPORT")"
   check_shadowing_in_list allow "$merged_allow"
   check_shadowing_in_list deny "$merged_deny"
+  check_shadowing_in_list ask "$merged_ask"
 fi
 
 # ---------------------------------------------------------------------------
