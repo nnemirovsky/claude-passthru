@@ -1,6 +1,6 @@
 {
   "name": "passthru",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Regex-based permission rules for Claude Code via hooks",
   "license": "MIT"
 }

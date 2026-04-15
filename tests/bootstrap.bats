@@ -123,8 +123,8 @@ run_boot() {
   [ "$status" -eq 0 ]
   [ -f "$(proj_imported)" ]
   run jq -r '.allow | length' "$(proj_imported)"
-  # fixture has 18 entries, 1 skipped (ExactStrangeFormat) -> 17 kept
-  [ "$output" = "17" ]
+  # fixture has 19 entries, 1 skipped (ExactStrangeFormat) -> 18 kept
+  [ "$output" = "18" ]
 }
 
 @test "bootstrap: dry-run output matches --write file content (schema-wise)" {
@@ -623,4 +623,184 @@ EOF
   [[ "$output" == *'^Read$'* ]]
   [[ "$output" == *'^Skill$'* ]]
   [[ "$output" == *'^mcp__context7__query\-docs$'* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Read/Edit/Write path normalization: leading `//` collapses to a single `/`,
+# matching Node's `path.resolve()` behaviour in Claude Code. Previously the
+# converter treated `Read(//...)` as "unusual" and skipped it. The hook
+# payload always carries a resolved, single-slash path, so a rule generated
+# from a `//...` entry would never match unless we normalize at import time.
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: Read(//private/tmp/foo/**) normalizes to single leading slash" {
+  printf '{"permissions":{"allow":["Read(//private/tmp/foo/**)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "1" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # The resulting regex must NOT carry two leading slashes (`regex_escape`
+  # would emit `\/\/` for the unnormalized form).
+  [[ "$pat" != *'\/\/'* ]]
+  # Must match the single-slash form Claude Code passes to the hook after
+  # Node's `path.resolve()` normalization, and everything under it.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/private/tmp/foo' "$pat"
+  [ "$status" -eq 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/private/tmp/foo/bar' "$pat"
+  [ "$status" -eq 0 ]
+  # Must NOT match a sibling that only shares the prefix literally.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/private/tmp/foobar' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap: Read(///deeply/nested/**) collapses all redundant slashes" {
+  printf '{"permissions":{"allow":["Read(///deeply/nested/**)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # No repeated escaped slashes should remain - normalization happens before
+  # the path gets escaped.
+  [[ "$pat" != *'\/\/'* ]]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/deeply/nested/x' "$pat"
+  [ "$status" -eq 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/deeply/nested' "$pat"
+  [ "$status" -eq 0 ]
+}
+
+@test "bootstrap: Read path with embedded double slash is normalized" {
+  printf '{"permissions":{"allow":["Read(/a//b/c)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # Embedded `//` collapses to single `/` before regex escaping.
+  [[ "$pat" != *'\/\/'* ]]
+  # The resulting (exact-form) regex matches the single-slash literal path.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/a/b/c' "$pat"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Read/Edit/Write skip cases that mirror Claude Code's own rejection rules.
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: Read(~user/.ssh) skipped (tilde variant not supported)" {
+  printf '{"permissions":{"allow":["Read(~user/.ssh)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"tilde variant not supported"* ]]
+  [[ "$output" == *"~user/.ssh"* ]]
+  # --write should produce an empty allow list (rule was skipped).
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: Read(~+) and Read(~-) skipped (tilde variants)" {
+  printf '{"permissions":{"allow":["Read(~+)","Read(~-)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"tilde variant not supported"* ]]
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: Read(~/foo) expands to \$HOME/foo (bare ~/ is accepted)" {
+  printf '{"permissions":{"allow":["Read(~/foo/**)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "1" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # The resolved path should start with the current HOME and end with the
+  # prefix-form suffix.
+  [[ "$pat" == "^"*"/foo(/|\$)" ]]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' "$HOME/foo" "$pat"
+  [ "$status" -eq 0 ]
+}
+
+@test "bootstrap: Read(\$HOME/x) skipped (shell expansion syntax)" {
+  printf '{"permissions":{"allow":["Read($HOME/x)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"shell expansion syntax not supported"* ]]
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: Read(\${HOME}/x) and Read(\$(pwd)/x) skipped (shell expansion)" {
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":["Read(${HOME}/x)","Read($(pwd)/x)"]}}
+EOF
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"shell expansion syntax not supported"* ]]
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: Read(%APPDATA%) skipped (windows env expansion)" {
+  printf '{"permissions":{"allow":["Read(%%APPDATA%%/foo)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"shell expansion syntax not supported"* ]]
+}
+
+@test "bootstrap: Read(=cmd) skipped (zsh equals expansion)" {
+  printf '{"permissions":{"allow":["Read(=cmd)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"shell expansion syntax not supported"* ]]
+}
+
+@test "bootstrap: Read(\\\\server\\share) skipped (UNC path)" {
+  # Feed a literal two-backslash `\\server\share` via a file (bash printf is
+  # too fiddly for doubled backslashes in JSON).
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":["Read(\\\\server\\share)"]}}
+EOF
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"UNC path not supported"* ]]
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: Edit and Write honor the same skip rules as Read" {
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":["Edit($HOME/x)","Write(=foo)"]}}
+EOF
+  run bash -c "bash '$BOOTSTRAP' --user-only 2>&1 >/dev/null"
+  [[ "$output" == *"Edit("* ]]
+  [[ "$output" == *"Write("* ]]
+  [[ "$output" == *"shell expansion syntax not supported"* ]]
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "0" ]
+}
+
+@test "bootstrap: Read(/path/with spaces/**) accepted (spaces are not a reject reason)" {
+  # Claude Code accepts paths with spaces; only shell-expansion, tilde
+  # variants, and UNC are rejected. Verify the converter keeps this entry.
+  printf '{"permissions":{"allow":["Read(/path/with spaces/**)"]}}\n' \
+    > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "1" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/path/with spaces/file' "$pat"
+  [ "$status" -eq 0 ]
 }
