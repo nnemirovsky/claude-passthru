@@ -26,6 +26,11 @@
 # Unknown shapes (rules with spaces past the prefix, unrecognized forms) are
 # skipped with a warning printed to stderr.
 #
+# Read/Edit/Write paths that use shell expansion (`$VAR`, `${VAR}`, `$(cmd)`,
+# `%VAR%`), zsh equals expansion (`=cmd`), tilde variants other than `~/`
+# (`~user`, `~+`, `~-`), or UNC (`\\server\share`) are skipped. This mirrors
+# Claude Code's own path validation rules.
+#
 # Flags:
 #   --write            actually write; default is a dry-run that prints JSON to stdout.
 #   --user-only        only scan/import user scope.
@@ -250,6 +255,19 @@ convert_rule() {
     # inner path for a trailing glob suffix (`/**` or `/*`). A glob suffix
     # means "anything under this directory"; without it the path is an
     # exact-file match.
+    #
+    # Acceptance mirrors Claude Code's actual path validation
+    # (src/utils/permissions/pathValidation.ts). Only the shapes that Claude
+    # Code itself rejects are skipped here:
+    #   * Unix shell expansion:   `$VAR`, `${VAR}`, `$(cmd)`
+    #   * Windows env expansion:  `%VAR%`
+    #   * Zsh equals expansion:   leading `=`
+    #   * Tilde variants other than `~/`: `~user`, `~+`, `~-`, bare `~`
+    #   * UNC paths:              leading `\\server\share`
+    # Everything else (including leading `//`, spaces, deeply nested paths)
+    # is accepted. Redundant `/` runs are normalized to a single `/` to
+    # mirror Node's `path.resolve()` output, which is what Claude Code
+    # ultimately compares against in the hook payload.
     local tool_name="${raw%%(*}"
     local inner="${raw#${tool_name}(}"
     inner="${inner%)}"
@@ -257,20 +275,70 @@ convert_rule() {
       printf '[WARN] skipping %s rule with empty path: %s\n' "$tool_name" "$raw" >&2
       return 0
     fi
+
+    # Shell / env expansion: `$`, `${...}`, `$(...)` anywhere in the path,
+    # or any `%...%` windows-style reference. Claude Code does not resolve
+    # these, so neither do we.
+    if [[ "$inner" == *'$'* ]] || [[ "$inner" == *'%'* ]]; then
+      printf '[WARN] skipping %s(%s): shell expansion syntax not supported\n' \
+        "$tool_name" "$inner" >&2
+      return 0
+    fi
+
+    # Zsh equals expansion: leading `=cmd` resolves against PATH, not
+    # handled by Claude Code.
+    if [[ "$inner" == =* ]]; then
+      printf '[WARN] skipping %s(%s): shell expansion syntax not supported\n' \
+        "$tool_name" "$inner" >&2
+      return 0
+    fi
+
+    # UNC paths. `containsVulnerableUncPath` in Claude Code rejects these.
+    if [[ "$inner" == '\\'* ]]; then
+      printf '[WARN] skipping %s(%s): UNC path not supported\n' \
+        "$tool_name" "$inner" >&2
+      return 0
+    fi
+
+    # Tilde variants. `~/...` and bare `~` are the only accepted forms -
+    # other variants (`~user`, `~+`, `~-`, `~N`) are left as literals by
+    # Claude Code and never match a resolved file_path in a hook payload.
+    # Convert `~/` and bare `~` to the current `$HOME` so the regex has a
+    # chance to match the already-resolved path the hook sees.
+    # NOTE: the `'~/'*` pattern below is a literal prefix match on the rule
+    # string (left-hand side), not a path we want tilde-expanded. ShellCheck's
+    # SC2088 flags any quoted `~` as "use $HOME", but here the tilde is
+    # intentional because we match the rule as the user wrote it.
+    if [[ "$inner" == '~' ]]; then
+      inner="$HOME"
+    elif [[ "${inner:0:2}" == "~/" ]]; then
+      inner="$HOME/${inner:2}"
+    elif [[ "${inner:0:1}" == "~" ]]; then
+      printf '[WARN] skipping %s(%s): tilde variant not supported\n' \
+        "$tool_name" "$inner" >&2
+      return 0
+    fi
+
+    # Collapse runs of `/` to a single `/`, matching Node's `path.resolve()`.
+    # Used on both the prefix form (before the trailing `/**`|`/*` is
+    # stripped) and the exact form.
+    local normalized
+    normalized="$(printf '%s' "$inner" | perl -pe 's|/{2,}|/|g')"
+
     local path_re
-    if [[ "$inner" == */\*\* ]]; then
-      local prefix="${inner%/\*\*}"
+    if [[ "$normalized" == */\*\* ]]; then
+      local prefix="${normalized%/\*\*}"
       local escaped
       escaped="$(regex_escape "$prefix")"
       path_re="^${escaped}(/|\$)"
-    elif [[ "$inner" == */\* ]]; then
-      local prefix="${inner%/\*}"
+    elif [[ "$normalized" == */\* ]]; then
+      local prefix="${normalized%/\*}"
       local escaped
       escaped="$(regex_escape "$prefix")"
       path_re="^${escaped}(/|\$)"
     else
       local escaped
-      escaped="$(regex_escape "$inner")"
+      escaped="$(regex_escape "$normalized")"
       path_re="^${escaped}\$"
     fi
     json="$(jq -cn \

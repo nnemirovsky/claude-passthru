@@ -117,6 +117,13 @@ bash .../scripts/bootstrap.sh --write
 
 Regex metacharacters in the original path/prefix/name are escaped so the converted pattern matches literally. Anything that does not match one of the shapes above is skipped with a `[WARN]` line on stderr (for example, custom MCP tool patterns that do not start with `mcp__`, or a `WebFetch(...)` with a non-`domain:` argument).
 
+For `Read`, `Edit`, and `Write`, path acceptance mirrors Claude Code's own rules (`src/utils/permissions/pathValidation.ts`): redundant slash runs (`//foo`, `///foo/bar`) are collapsed to a single slash, `~/...` expands to `$HOME/...`, and paths with spaces or deep nesting are accepted. Only the shapes Claude Code itself rejects are skipped with a `[WARN]`:
+
+* shell / env expansion: `$VAR`, `${VAR}`, `$(cmd)`, `%VAR%`
+* zsh equals expansion: leading `=` (e.g. `=cmd`)
+* tilde variants other than `~/`: `~user`, `~+`, `~-`, `~N`
+* UNC paths: leading `\\server\share`
+
 Bootstrap writes to dedicated imported files so hand-curated rules in `passthru.json` stay separate:
 
 * `~/.claude/passthru.imported.json` (user scope)

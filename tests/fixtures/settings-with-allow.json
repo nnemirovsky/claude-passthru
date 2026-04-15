@@ -14,6 +14,7 @@
       "Bash(npm run test:unit)",
       "WebSearch",
       "Read(/private/tmp/ios-webkit-debug-proxy/**)",
+      "Read(//private/tmp/double-slash-normalized/**)",
       "Read(/etc/hosts)",
       "Edit(/var/log/app.log)",
       "Write(/tmp/out/**)",
