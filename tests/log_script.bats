@@ -363,11 +363,26 @@ EOF
   write_fixture
   run_log --since today --format raw
   [ "$status" -eq 0 ]
-  # All four fixture entries are within the last 2 hours, so they should
-  # all survive the today cutoff.
+  # Count how many fixture entries are actually within "today" in local tz.
+  # The 2h-old entry may have fallen into yesterday when the test runs
+  # within 2 hours of local midnight (common on UTC-running CI).
+  local now midnight expected
+  now="$(date +%s)"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    midnight="$(date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) 00:00:00" +%s)"
+  else
+    midnight="$(date -d "$(date +%Y-%m-%d) 00:00:00" +%s)"
+  fi
+  expected=0
+  for offset in 7200 1800 300 0; do
+    local ts=$((now - offset))
+    [ "$ts" -ge "$midnight" ] && expected=$((expected + 1))
+  done
   local n
   n="$(printf '%s\n' "$output" | grep -c '"ts":' || true)"
-  [ "$n" -eq 4 ]
+  [ "$n" -eq "$expected" ]
+  # At minimum the "now" entry must survive.
+  [ "$n" -ge 1 ]
 }
 
 @test "--since 30d keeps all fixture entries" {
