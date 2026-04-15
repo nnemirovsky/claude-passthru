@@ -137,6 +137,14 @@ setup() {
   [ "$output" = "1" ]
 }
 
+@test "hooks/hooks.json SessionStart matcher is startup" {
+  # Restricts the one-time hint to brand-new sessions. Resume/clear/compact
+  # must not re-fire it.
+  run jq -r '.hooks.SessionStart[0].matcher' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "startup" ]
+}
+
 @test "hooks/hooks.json SessionStart command uses CLAUDE_PLUGIN_ROOT" {
   run jq -r '.hooks.SessionStart[0].hooks[0].command' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]

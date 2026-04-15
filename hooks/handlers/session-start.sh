@@ -5,19 +5,20 @@
 #   One-time, best-effort hint nudging brand-new passthru users to run
 #   `/passthru:bootstrap` if they already have native permission rules in
 #   their `~/.claude/settings.json` that could be imported. Prints a
-#   stderr message at the start of the Claude Code session (SessionStart
-#   stderr is visible to the user) and touches a marker so the hint does
-#   not fire again.
+#   single-line plain-text message on stdout, which Claude Code surfaces
+#   in the session header as "SessionStart:startup says: <text>". Then
+#   touches a marker so the hint does not fire again.
 #
 # Contract:
 #   stdin  - JSON envelope from Claude Code (SessionStart hook). We do
 #            not need any of its fields; we still drain stdin defensively
 #            so the writer does not hit SIGPIPE.
-#   stdout - `{}` (no additional context). SessionStart hooks can return
-#            an `additionalContext` field, but we keep the session-log
-#            hint off-session via stderr to avoid nagging inside the
-#            conversation.
-#   exit   - always 0. Any error fails open.
+#   stdout - a single line of plain text when the hint should fire,
+#            otherwise EMPTY. Per Claude Code docs, SessionStart stdout
+#            is appended to the session view as
+#            "SessionStart:startup says: <text>". Anything else (e.g.
+#            `{}`) would appear verbatim to the user.
+#   exit   - always 0. Any error fails open (empty stdout, exit 0).
 #
 # Gating:
 #   - If the marker file `${PASSTHRU_USER_HOME}/.claude/passthru.bootstrap-hint-shown`
@@ -27,7 +28,7 @@
 #     marker and exit silently.
 #   - If `~/.claude/settings.json` has no `.permissions.allow` entries,
 #     there is nothing to import - touch the marker and exit silently.
-#   - Otherwise: count the allow entries, emit the hint to stderr, touch
+#   - Otherwise: count the allow entries, emit the hint on stdout, touch
 #     the marker.
 #
 # Paths honor PASSTHRU_USER_HOME and PASSTHRU_PROJECT_DIR so bats tests
@@ -46,7 +47,6 @@ else
   _PASSTHRU_COMMON="${_PASSTHRU_HANDLER_DIR}/../common.sh"
   if [ ! -f "$_PASSTHRU_COMMON" ]; then
     # Never block session start, even on a broken install.
-    printf '{}\n'
     exit 0
   fi
   # shellcheck disable=SC1090
@@ -54,9 +54,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Fail-open wrapper: any unexpected error prints {} + exit 0.
+# Fail-open wrapper: any unexpected error prints nothing + exit 0.
 # ---------------------------------------------------------------------------
-trap 'printf "[passthru] unexpected error in session-start.sh\n" >&2; printf "{}\n"; exit 0' ERR
+trap 'printf "[passthru] unexpected error in session-start.sh\n" >&2; exit 0' ERR
 
 # ---------------------------------------------------------------------------
 # Drain stdin defensively so the parent does not see SIGPIPE on its
@@ -74,7 +74,6 @@ MARKER="${USER_HOME}/.claude/passthru.bootstrap-hint-shown"
 # 1. Marker already set -> silent no-op.
 # ---------------------------------------------------------------------------
 if [ -e "$MARKER" ]; then
-  printf '{}\n'
   exit 0
 fi
 
@@ -86,7 +85,6 @@ fi
 MARKER_DIR="$(dirname "$MARKER")"
 if [ ! -d "$MARKER_DIR" ]; then
   mkdir -p "$MARKER_DIR" 2>/dev/null || {
-    printf '{}\n'
     exit 0
   }
 fi
@@ -107,7 +105,6 @@ PROJECT_IMPORTED="$(passthru_project_imported_path)"
 if [ -f "$USER_AUTHORED" ] || [ -f "$USER_IMPORTED" ] \
    || [ -f "$PROJECT_AUTHORED" ] || [ -f "$PROJECT_IMPORTED" ]; then
   touch_marker
-  printf '{}\n'
   exit 0
 fi
 
@@ -131,17 +128,14 @@ fi
 
 if [ "$COUNT" -eq 0 ]; then
   touch_marker
-  printf '{}\n'
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Emit the one-time hint and persist the marker.
+# 4. Emit the one-time hint on stdout and persist the marker.
+#    Single line keeps the session header readable.
 # ---------------------------------------------------------------------------
-printf '[passthru] Detected %s importable rule(s) in your existing settings.json.\n' "$COUNT" >&2
-printf '[passthru] Run /passthru:bootstrap to import them into passthru'\''s regex format.\n' >&2
-printf '[passthru] This hint only shows once.\n' >&2
+printf 'passthru: detected %s importable permission rule(s) in ~/.claude/settings.json. Run /passthru:bootstrap to convert them. This tip only shows once.\n' "$COUNT"
 
 touch_marker
-printf '{}\n'
 exit 0
