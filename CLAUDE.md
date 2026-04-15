@@ -17,8 +17,9 @@ commands/
   verify.md            /passthru:verify slash command (prompt-based)
   log.md               /passthru:log slash command (prompt-based)
 hooks/
-  hooks.json           registers PreToolUse + PostToolUse (timeout 10s each, matcher "*") and
-                       SessionStart (timeout 5s, no matcher) handlers
+  hooks.json           registers PreToolUse + PostToolUse + PostToolUseFailure
+                       (timeout 10s each, matcher "*") and SessionStart
+                       (timeout 5s, no matcher) handlers
   common.sh            shared library. Functions:
                          * load_rules / validate_rules (merge + schema-check)
                          * pcre_match / match_rule / find_first_match (rule matching)
@@ -26,11 +27,22 @@ hooks/
                            passthru_sha256, sanitize_tool_use_id (env + path helpers)
                          * audit_enabled, audit_log_path, emit_passthrough
                            (audit + output helpers)
+                         * write_post_event, is_denied_response,
+                           is_permission_error_string, entries_look_tailored,
+                           entry_matches_call, read_settings_allow,
+                           read_settings_deny, classify_passthrough_outcome
+                           (post-hook classification, shared by both post handlers)
                        Sourced by hook handlers AND by scripts/log.sh,
                        scripts/verify.sh, scripts/write-rule.sh.
   handlers/
     pre-tool-use.sh    main hook: loads rules, matches, emits allow/deny/passthrough
-    post-tool-use.sh   classifies native-dialog outcomes into asked_* events (audit only)
+    post-tool-use.sh   classifies successful native-dialog outcomes into asked_* events.
+                       Delegates to classify_passthrough_outcome in common.sh.
+    post-tool-use-failure.sh
+                       classifies failed tool calls. Permission-denied error strings ->
+                       asked_denied_* via the same shared helper. Other failures ->
+                       `errored` event (carries error_type, synthesizes timeout/interrupted
+                       from is_timeout/is_interrupt when CC omits error_type).
     session-start.sh   bootstrap hint. Re-fires every session while importable entries in
                        settings.json / settings.local.json are not yet covered by
                        _source_hash values in passthru.imported.json. Hash diff replaces

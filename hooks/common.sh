@@ -288,6 +288,287 @@ emit_passthrough() {
 }
 
 # ---------------------------------------------------------------------------
+# Post-hook classification helpers
+# ---------------------------------------------------------------------------
+#
+# Shared between post-tool-use.sh (success path + tool_response shapes) and
+# post-tool-use-failure.sh (failure envelope). Both handlers read the
+# PreToolUse breadcrumb, diff against the current settings.json shas, and
+# classify the outcome into one of the `asked_*` events plus (for failures)
+# the new `errored` event.
+
+# write_post_event <event> <tool_name> <tool_use_id> [error_type]
+# Appends one JSONL line to the audit log. Fail-open (never propagates errors).
+# The optional 4th arg, when non-empty, is written as `error_type` to the log.
+# That lets the new `errored` event carry the CC-provided error classification
+# (for example `timeout`, `interrupted`, `not_found`) without breaking the
+# existing 3-arg signature used by post-tool-use.sh.
+write_post_event() {
+  local event="$1" tool="$2" tool_use_id="$3" error_type="${4:-}"
+  local path ts line dir
+  path="$(audit_log_path)"
+  ts="$(passthru_iso_ts)"
+
+  line="$(
+    jq -cn \
+      --arg ts "$ts" \
+      --arg event "$event" \
+      --arg tool "$tool" \
+      --arg tool_use_id "$tool_use_id" \
+      --arg error_type "$error_type" \
+      '{
+        ts: $ts,
+        event: $event,
+        source: "native",
+        tool: $tool,
+        tool_use_id: (if $tool_use_id == "" then null else $tool_use_id end)
+      }
+      | (if $error_type == "" then . else (. + {error_type: $error_type}) end)' 2>/dev/null
+  )" || return 0
+  [ -z "$line" ] && return 0
+
+  dir="$(dirname "$path")"
+  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 0
+
+  printf '%s\n' "$line" >> "$path" 2>/dev/null || return 0
+  return 0
+}
+
+# is_denied_response <tool_response_json>
+# Accepts several shapes Claude Code has been observed to emit for a
+# permission-denied outcome. Rather than pin to one schema, we treat any
+# of the following as "denied":
+#   - tool_response is the literal string "null" (explicit null payload)
+#   - tool_response.permissionDenied is true
+#   - tool_response.error / .errorMessage / .message matches an anchored
+#     permission/access/blocked/denied/not-allowed token (underscore, hyphen,
+#     or space separator variants all accepted)
+#   - tool_response.status or .state equals one of:
+#       "denied", "permission_denied", "permissionDenied", "blocked"
+# Empty / missing tool_response is NOT classified as denied (no signal).
+# Returns 0 when denied, 1 otherwise.
+is_denied_response() {
+  local resp="$1"
+  # Empty payload: no signal at all. Treat as not-denied so we do not promote
+  # ambiguous outcomes (e.g. background tools without a structured response)
+  # into asked_denied_*.
+  [ -z "$resp" ] && return 1
+  if [ "$resp" = "null" ]; then
+    return 0
+  fi
+  # Whether the JSON's permissionDenied flag is true.
+  local flag
+  flag="$(jq -r '.permissionDenied // false' <<<"$resp" 2>/dev/null || echo 'false')"
+  if [ "$flag" = "true" ]; then
+    return 0
+  fi
+  # Error messages carrying a permission marker.
+  local err status
+  err="$(jq -r '(.error // .errorMessage // .message // "") | tostring' <<<"$resp" 2>/dev/null || echo '')"
+  if [ -n "$err" ]; then
+    if printf '%s' "$err" | grep -qiE '(permission[- _]?denied|access[- _]?denied|not[- _]?allowed|\bblocked\b|\bdenied\b)'; then
+      return 0
+    fi
+  fi
+  status="$(jq -r '.status // .state // ""' <<<"$resp" 2>/dev/null || echo '')"
+  case "$status" in
+    denied|permission_denied|permissionDenied|blocked)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# is_permission_error_string <error_string>
+# Returns 0 if the error string from a failure-envelope (no JSON wrapper)
+# matches any anchored permission-denied token. Reuses the same token set as
+# is_denied_response so CC-generated denial strings classify identically in
+# both the success-shaped path and the failure-envelope path.
+is_permission_error_string() {
+  local err="$1"
+  [ -z "$err" ] && return 1
+  if printf '%s' "$err" | grep -qiE '(permission[- _]?denied|access[- _]?denied|not[- _]?allowed|\bblocked\b|\bdenied\b)'; then
+    return 0
+  fi
+  return 1
+}
+
+# entries_look_tailored <new_entries_json> <tool_name> <tool_input_json>
+# Returns 0 if any entry in new_entries looks plausibly tied to the given
+# tool call. Because the breadcrumb only persists a sha of the prior
+# settings file (not the entries themselves), we test every entry in the
+# current settings file rather than diffing. The worst case (false-positive
+# `always` classification when the entry predated this call) still produces
+# a truthful line: the rule does cover the call.
+entries_look_tailored() {
+  local new_entries="$1" tool_name="$2" tool_input="$3"
+
+  [ -z "$new_entries" ] && return 1
+  local entry
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    if entry_matches_call "$entry" "$tool_name" "$tool_input"; then
+      return 0
+    fi
+  done < <(jq -r '.[]? | select(type == "string")' <<<"$new_entries" 2>/dev/null)
+  return 1
+}
+
+# entry_matches_call <entry> <tool_name> <tool_input_json>
+# Match a single native permissions string against the current tool call.
+entry_matches_call() {
+  local entry="$1" tool_name="$2" tool_input="$3"
+
+  # Bare tool-name entry -> matches any call to that tool.
+  if [ "$entry" = "$tool_name" ]; then
+    return 0
+  fi
+
+  # Parse the leading "ToolName(...)" form.
+  local entry_tool entry_arg
+  entry_tool="${entry%%(*}"
+  if [ "$entry_tool" = "$entry" ]; then
+    # No parentheses; already handled by the bare-name branch.
+    return 1
+  fi
+  if [ "$entry_tool" != "$tool_name" ]; then
+    return 1
+  fi
+  # Strip leading "ToolName(" and trailing ")".
+  entry_arg="${entry#*(}"
+  entry_arg="${entry_arg%)}"
+
+  case "$tool_name" in
+    Bash)
+      # Native `Bash(...)` permissions come in two flavors:
+      #   Bash(ls:*)  -- prefix form; matches any command starting with `ls`
+      #                  followed by whitespace or end-of-string.
+      #   Bash(ls)    -- exact form; matches ONLY the literal command `ls`.
+      [ -z "$entry_arg" ] && return 1
+      local cmd
+      cmd="$(jq -r '.command // ""' <<<"$tool_input" 2>/dev/null || echo '')"
+      [ -z "$cmd" ] && return 1
+      if [[ "$entry_arg" == *:\* ]]; then
+        local prefix="${entry_arg%:\*}"
+        [ -z "$prefix" ] && return 1
+        case "$cmd" in
+          "$prefix"|"$prefix "*) return 0 ;;
+        esac
+        return 1
+      fi
+      [ "$cmd" = "$entry_arg" ] && return 0
+      return 1
+      ;;
+    WebFetch)
+      local want_host
+      want_host="${entry_arg#domain:}"
+      [ -z "$want_host" ] && return 1
+      local url host
+      url="$(jq -r '.url // ""' <<<"$tool_input" 2>/dev/null || echo '')"
+      [ -z "$url" ] && return 1
+      host="${url#*://}"
+      host="${host%%\#*}"
+      host="${host%%\?*}"
+      host="${host%%/*}"
+      host="${host%%:*}"
+      [ -z "$host" ] && return 1
+      if [ "$host" = "$want_host" ] || [[ "$host" == *".$want_host" ]]; then
+        return 0
+      fi
+      return 1
+      ;;
+    Read|Edit|Write)
+      [ -z "$entry_arg" ] && return 1
+      local prefix="${entry_arg%:\*}"
+      [ -z "$prefix" ] && return 1
+      local fp
+      fp="$(jq -r '.file_path // ""' <<<"$tool_input" 2>/dev/null || echo '')"
+      [ -z "$fp" ] && return 1
+      case "$fp" in
+        "$prefix"|"$prefix"/*) return 0 ;;
+      esac
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# read_settings_allow <path>: emit permissions.allow as a JSON array, or "[]".
+read_settings_allow() {
+  local path="$1"
+  [ -f "$path" ] || { printf '[]\n'; return 0; }
+  jq -c '.permissions.allow // []' "$path" 2>/dev/null || printf '[]\n'
+}
+
+# read_settings_deny <path>: emit permissions.deny as a JSON array, or "[]".
+read_settings_deny() {
+  local path="$1"
+  [ -f "$path" ] || { printf '[]\n'; return 0; }
+  jq -c '.permissions.deny // []' "$path" 2>/dev/null || printf '[]\n'
+}
+
+# classify_passthrough_outcome <denied_bool> <tool_name> <tool_input_json> \
+#                              <old_user_sha> <old_proj_sha>
+# Diffs the old breadcrumb shas against the current settings files and emits
+# the classification event name on stdout. Does NOT write anything to the
+# audit log; the caller invokes write_post_event with the returned event.
+#
+# Arguments:
+#   denied_bool     - "1" if the outcome was denied (permission refusal),
+#                     "0" if the outcome was a success shape.
+#   tool_name       - the PostToolUse tool_name (used for entry tailoring).
+#   tool_input_json - compact JSON (used for entry tailoring).
+#   old_user_sha    - user settings.json sha recorded in the breadcrumb.
+#   old_proj_sha    - project settings.local.json sha recorded in the breadcrumb.
+#
+# Output (stdout, one line, no newline):
+#   asked_denied_once | asked_denied_always |
+#   asked_allowed_once | asked_allowed_always | asked_allowed_unknown
+classify_passthrough_outcome() {
+  local denied="$1" tool_name="$2" tool_input="$3" old_user_sha="$4" old_proj_sha="$5"
+
+  local user_settings proj_settings new_user_sha new_proj_sha
+  local user_changed=0 proj_changed=0
+  user_settings="$(passthru_user_home)/.claude/settings.json"
+  proj_settings="${PASSTHRU_PROJECT_DIR:-$PWD}/.claude/settings.local.json"
+  new_user_sha="$(passthru_sha256 "$user_settings")"
+  new_proj_sha="$(passthru_sha256 "$proj_settings")"
+  [ "$old_user_sha" != "$new_user_sha" ] && user_changed=1
+  [ "$old_proj_sha" != "$new_proj_sha" ] && proj_changed=1
+
+  local event=""
+  if [ "$denied" = "1" ]; then
+    event="asked_denied_once"
+    if [ "$user_changed" -eq 1 ] || [ "$proj_changed" -eq 1 ]; then
+      local udeny pdeny
+      udeny="$(read_settings_deny "$user_settings")"
+      pdeny="$(read_settings_deny "$proj_settings")"
+      if entries_look_tailored "$udeny" "$tool_name" "$tool_input" \
+        || entries_look_tailored "$pdeny" "$tool_name" "$tool_input"; then
+        event="asked_denied_always"
+      fi
+    fi
+  else
+    if [ "$user_changed" -eq 0 ] && [ "$proj_changed" -eq 0 ]; then
+      event="asked_allowed_once"
+    else
+      local uallow pallow
+      uallow="$(read_settings_allow "$user_settings")"
+      pallow="$(read_settings_allow "$proj_settings")"
+      if entries_look_tailored "$uallow" "$tool_name" "$tool_input" \
+        || entries_look_tailored "$pallow" "$tool_name" "$tool_input"; then
+        event="asked_allowed_always"
+      else
+        event="asked_allowed_unknown"
+      fi
+    fi
+  fi
+  printf '%s' "$event"
+}
+
+# ---------------------------------------------------------------------------
 # Rule file paths
 # ---------------------------------------------------------------------------
 

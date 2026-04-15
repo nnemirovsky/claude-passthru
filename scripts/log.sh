@@ -172,6 +172,12 @@ color_for_event() {
     passthrough|asked_allowed_unknown)
       printf '\033[33m'  # yellow
       ;;
+    errored)
+      # Non-permission tool-call failures surfaced via PostToolUseFailure.
+      # Dim (not red: the call was not refused, it errored out for some
+      # other reason - network, parse error, interrupt, timeout).
+      printf '\033[2m'
+      ;;
     *)
       printf ''
       ;;

@@ -131,6 +131,43 @@ setup() {
   [ "$output" = "10" ]
 }
 
+@test "hooks/hooks.json has exactly one PostToolUseFailure entry" {
+  # CC routes failed tool calls (non-zero outcomes, including permission
+  # refusals) to PostToolUseFailure rather than PostToolUse. Registering a
+  # dedicated handler lets us classify failed passthrough calls instead of
+  # leaving orphan breadcrumbs + incomplete audit lines.
+  run jq -r '.hooks.PostToolUseFailure | length' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "1" ]
+}
+
+@test "hooks/hooks.json PostToolUseFailure matcher is *" {
+  run jq -r '.hooks.PostToolUseFailure[0].matcher' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "*" ]
+}
+
+@test "hooks/hooks.json PostToolUseFailure command uses bash + CLAUDE_PLUGIN_ROOT" {
+  run jq -r '.hooks.PostToolUseFailure[0].hooks[0].command' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == bash\ * ]]
+  [[ "$output" == *'${CLAUDE_PLUGIN_ROOT}'* ]]
+  [[ "$output" == *'post-tool-use-failure.sh' ]]
+}
+
+@test "hooks/hooks.json PostToolUseFailure timeout is 10" {
+  # Same budget as PostToolUse since the handler runs the same classifier.
+  run jq -r '.hooks.PostToolUseFailure[0].hooks[0].timeout' "$REPO_ROOT/hooks/hooks.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "10" ]
+}
+
+@test "hooks/hooks.json PostToolUseFailure handler script exists and is executable" {
+  local script="$REPO_ROOT/hooks/handlers/post-tool-use-failure.sh"
+  [ -f "$script" ]
+  [ -x "$script" ]
+}
+
 @test "hooks/hooks.json has exactly one SessionStart entry" {
   run jq -r '.hooks.SessionStart | length' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]

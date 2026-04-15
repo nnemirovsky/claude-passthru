@@ -329,6 +329,11 @@ From the `PostToolUse` hook, classifying what the native dialog decided for a pa
 * `asked_denied_always` - user denied permanently.
 * `asked_allowed_unknown` - outcome could not be classified (e.g. session ended mid-dialog).
 
+From the `PostToolUseFailure` hook, which Claude Code routes failed tool calls through (non-zero outcomes, permission refusals, runtime errors, interrupts, timeouts):
+
+* The `asked_denied_*` events above are also emitted from this path when the failure's `error` field carries a permission-denied token (`permission denied`, `access denied`, `not allowed`, `blocked`, `denied`).
+* `errored` - non-permission tool failure. The log line carries an `error_type` field when CC provides one, otherwise synthesizes `timeout` or `interrupted` from the envelope flags.
+
 **View the log:**
 
 ```
