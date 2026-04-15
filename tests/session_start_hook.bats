@@ -1,32 +1,29 @@
 #!/usr/bin/env bats
 
 # tests/session_start_hook.bats
-# Covers hooks/handlers/session-start.sh: the one-time bootstrap hint emitted
-# at Claude Code session start when the user has native permission rules in
-# ~/.claude/settings.json and has not used the plugin yet.
+# Covers hooks/handlers/session-start.sh: the hash-diff-gated bootstrap hint.
+# The hint re-fires every session until every importable entry in
+# settings.json/settings.local.json is present (by _source_hash) in one of
+# the passthru.imported.json files. It auto-silences when migration is
+# complete.
 #
 # Gating matrix:
-#   * marker present                                       -> silent, no hint
-#   * marker absent + passthru.json exists (user)          -> marker created, no hint
-#   * marker absent + passthru.imported.json exists (user) -> marker created, no hint
-#   * marker absent + passthru.json exists (project)       -> marker created, no hint
-#   * marker absent + no passthru files + no settings.json -> marker created, no hint
-#   * marker absent + no passthru files + settings.json with empty allow
-#                                                          -> marker created, no hint
-#   * marker absent + no passthru files + settings.json with N allow entries
-#                                                          -> hint on stdout, marker created
-#   * malformed stdin                                      -> fail open (exit 0, no crash)
+#   * no settings files                                         -> silent, no hint
+#   * settings with no .permissions.allow                       -> silent, no hint
+#   * settings with only non-importable entries                 -> silent, no hint
+#   * settings with N importable entries, no imported file      -> hint with count N
+#   * settings + legacy imported (no _source_hash fields)       -> hint with count N
+#   * settings fully imported (all _source_hash present)        -> silent, no hint
+#   * settings partially imported (k of N covered)              -> hint with count N-k
+#   * malformed settings.json                                   -> silent, no crash
+#   * malformed stdin                                           -> silent, no crash
+#   * malformed imported.json                                   -> hint still fires
+#   * unrelated passthru.json (authored) present                -> does not gate the hint
+#
+# The hash helper is `hash_settings_entry` from common.sh. Tests compute
+# hashes via the same helper to keep tests and the handler in lockstep.
 #
 # Hermetic via PASSTHRU_USER_HOME / PASSTHRU_PROJECT_DIR.
-#
-# Contract notes:
-#   Per Claude Code docs, the SessionStart hook surfaces its `systemMessage`
-#   JSON field in the session view as "SessionStart:startup says: <text>".
-#   The handler therefore emits `{"systemMessage":"<text>"}` on stdout when
-#   the hint fires, and emits nothing on stdout in all other cases -
-#   including the marker-present short-circuit - so the session header stays
-#   clean. Plain text stdout does NOT surface, so earlier versions of this
-#   hook were silently ignored by Claude Code.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -39,14 +36,13 @@ setup() {
 
   export PASSTHRU_USER_HOME="$USER_ROOT"
   export PASSTHRU_PROJECT_DIR="$PROJ_ROOT"
+
+  # shellcheck disable=SC1090
+  source "$REPO_ROOT/hooks/common.sh"
 }
 
 teardown() {
   [ -n "${TMP:-}" ] && rm -rf "$TMP"
-}
-
-marker_path() {
-  printf '%s/.claude/passthru.bootstrap-hint-shown\n' "$USER_ROOT"
 }
 
 # run_handler <stdin>
@@ -67,161 +63,76 @@ run_handler() {
   export status STDOUT STDERR
 }
 
-# assert_hint_envelope: verify STDOUT is a well-formed JSON object with
-# `.systemMessage` containing the passthru hint fragments. Requires jq.
+# assert_hint_envelope [expected_count]
+# Verify STDOUT is a well-formed JSON object whose .systemMessage mentions
+# `/passthru:bootstrap`. With an argument, also assert the count phrase.
 assert_hint_envelope() {
-  # Must be parseable as JSON.
   jq -e '.' <<<"$STDOUT" >/dev/null
-  # Must have a systemMessage string field.
   jq -e '.systemMessage | type == "string"' <<<"$STDOUT" >/dev/null
   local msg
   msg="$(jq -r '.systemMessage' <<<"$STDOUT")"
   [[ "$msg" == *"/passthru:bootstrap"* ]]
-  [[ "$msg" == *"only shows once"* ]]
+  if [ "$#" -ge 1 ]; then
+    local n="$1"
+    if [ "$n" -eq 1 ]; then
+      [[ "$msg" == *"1 importable permission rule "* ]]
+    else
+      [[ "$msg" == *"$n importable permission rules "* ]]
+    fi
+  fi
+  # Only systemMessage key.
+  local keys
+  keys="$(jq -r 'keys | join(",")' <<<"$STDOUT")"
+  [ "$keys" = "systemMessage" ]
+}
+
+# Helpers to assemble fixture imported files with a hash per rule.
+make_imported_allow_hash_only() {
+  # $1 path to write, $2..$N raw entries (hashed via hash_settings_entry)
+  local path="$1"; shift
+  local arr="[]"
+  local e h
+  for e in "$@"; do
+    h="$(hash_settings_entry "$e")"
+    arr="$(jq -c --arg hash "$h" '. + [{tool:"Bash", match:{command:"^x$"}, reason:"t", _source_hash:$hash}]' <<<"$arr")"
+  done
+  jq -cn --argjson a "$arr" '{version:1, allow:$a, deny:[]}' > "$path"
 }
 
 # ---------------------------------------------------------------------------
-# Marker short-circuit
+# No settings / empty settings -> silent
 # ---------------------------------------------------------------------------
 
-@test "session-start: marker present -> silent, exit 0" {
-  touch "$(marker_path)"
-  # Even with an allow-entry-laden settings.json present, the marker must
-  # suppress the hint.
-  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
-
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-  # stdout must be empty - no JSON envelope in the session header.
-  [ -z "$STDOUT" ]
-  # No stderr hint.
-  [ -z "$STDERR" ]
-}
-
-# ---------------------------------------------------------------------------
-# User already uses the plugin -> touch and exit, no hint.
-# ---------------------------------------------------------------------------
-
-@test "session-start: user passthru.json exists -> marker created, no hint" {
-  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
-  printf '{"version":1,"allow":[],"deny":[]}\n' > "$USER_ROOT/.claude/passthru.json"
-
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-  [ -z "$STDOUT" ]
-  [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
-}
-
-@test "session-start: user passthru.imported.json exists -> marker created, no hint" {
-  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
-  printf '{"version":1,"allow":[],"deny":[]}\n' > "$USER_ROOT/.claude/passthru.imported.json"
-
+@test "session-start: no settings files at all -> silent, exit 0" {
   run_handler '{}'
   [ "$status" -eq 0 ]
   [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
 }
 
-@test "session-start: project passthru.json exists -> marker created, no hint" {
-  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
-  printf '{"version":1,"allow":[],"deny":[]}\n' > "$PROJ_ROOT/.claude/passthru.json"
-
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-  [ -z "$STDOUT" ]
-  [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
-}
-
-@test "session-start: project passthru.imported.json exists -> marker created, no hint" {
-  printf '{"permissions":{"allow":["Bash(ls:*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
-  printf '{"version":1,"allow":[],"deny":[]}\n' > "$PROJ_ROOT/.claude/passthru.imported.json"
-
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-  [ -z "$STDOUT" ]
-  [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
-}
-
-# ---------------------------------------------------------------------------
-# No passthru files, no / empty settings -> touch and exit, no hint.
-# ---------------------------------------------------------------------------
-
-@test "session-start: no passthru files and no settings.json -> marker created, no hint" {
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-  [ -z "$STDOUT" ]
-  [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
-}
-
-@test "session-start: settings.json with empty permissions.allow -> marker created, no hint" {
+@test "session-start: settings with empty permissions.allow -> silent, no hint" {
   printf '{"permissions":{"allow":[]}}\n' > "$USER_ROOT/.claude/settings.json"
 
   run_handler '{}'
   [ "$status" -eq 0 ]
   [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
 }
 
-@test "session-start: settings.json with no permissions key -> marker created, no hint" {
+@test "session-start: settings with no permissions key -> silent, no hint" {
   printf '{}\n' > "$USER_ROOT/.claude/settings.json"
 
   run_handler '{}'
   [ "$status" -eq 0 ]
   [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
 }
 
-# ---------------------------------------------------------------------------
-# Actual hint path.
-# ---------------------------------------------------------------------------
-
-@test "session-start: settings.json with N allow entries -> hint systemMessage mentions N and /passthru:bootstrap" {
-  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)","mcp__context7__query-docs"]}}' \
+@test "session-start: settings with only non-importable entries -> silent, no hint" {
+  # ExactStrangeFormat is not recognized; bootstrap would WARN-skip.
+  printf '%s\n' '{"permissions":{"allow":["ExactStrangeFormat","NotAToolRule"]}}' \
     > "$USER_ROOT/.claude/settings.json"
 
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-
-  # Hint lands on stdout wrapped in the Claude Code JSON contract so it
-  # surfaces as "SessionStart:startup says: <text>".
-  jq -e '.' <<<"$STDOUT" >/dev/null
-  local msg
-  msg="$(jq -r '.systemMessage' <<<"$STDOUT")"
-  [[ "$msg" == *"3 importable"* ]]
-  [[ "$msg" == *"/passthru:bootstrap"* ]]
-  [[ "$msg" == *"only shows once"* ]]
-
-  # Only the systemMessage key should be present - keep the envelope
-  # minimal so we do not accidentally inject context.
-  local keys
-  keys="$(jq -r 'keys | join(",")' <<<"$STDOUT")"
-  [ "$keys" = "systemMessage" ]
-
-  # Nothing on stderr in the happy path.
-  [ -z "$STDERR" ]
-
-  # Marker is created so we do not re-hint.
-  [ -f "$(marker_path)" ]
-}
-
-@test "session-start: hint fires exactly once - second run is silent" {
-  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
-    > "$USER_ROOT/.claude/settings.json"
-
-  run_handler '{}'
-  [ "$status" -eq 0 ]
-  [ -n "$STDOUT" ]
-  assert_hint_envelope
-  [ -f "$(marker_path)" ]
-
-  # Second invocation must be silent on both streams.
   run_handler '{}'
   [ "$status" -eq 0 ]
   [ -z "$STDOUT" ]
@@ -229,42 +140,240 @@ assert_hint_envelope() {
 }
 
 # ---------------------------------------------------------------------------
-# Malformed stdin -> fail open.
+# Hint fires: settings has importable entries, nothing imported yet
 # ---------------------------------------------------------------------------
 
-@test "session-start: malformed stdin JSON -> exit 0, no crash" {
-  # Hint conditions are met so only a stdin-parse crash would surface here.
+@test "session-start: settings with N importable entries, no imported file -> hint with count" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)","mcp__context7__query-docs"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 3
+  [ -z "$STDERR" ]
+}
+
+@test "session-start: hint with singular phrasing when count is 1" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+@test "session-start: non-importable entries do NOT inflate the count" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","ExactStrangeFormat","Bash(pwd:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  # 2 importable (both Bash) + 1 skipped.
+  assert_hint_envelope 2
+}
+
+# ---------------------------------------------------------------------------
+# Re-fires until migration completes
+# ---------------------------------------------------------------------------
+
+@test "session-start: hint re-fires across multiple runs while imports are missing" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+
+  # Second invocation - still no imported file -> still fires.
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+# ---------------------------------------------------------------------------
+# Legacy imported files (no _source_hash) -> hint still fires
+# ---------------------------------------------------------------------------
+
+@test "session-start: legacy imported file without _source_hash -> hint fires" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  # Legacy file shape: allow array with rules that lack _source_hash.
+  cat > "$USER_ROOT/.claude/passthru.imported.json" <<'JSON'
+{
+  "version": 1,
+  "allow": [{"tool":"Bash","match":{"command":"^ls(\\s|$)"},"reason":"legacy"}],
+  "deny": []
+}
+JSON
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+# ---------------------------------------------------------------------------
+# Fully covered: settings all imported -> silent
+# ---------------------------------------------------------------------------
+
+@test "session-start: settings fully covered by imported _source_hash -> silent, no hint" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  make_imported_allow_hash_only \
+    "$USER_ROOT/.claude/passthru.imported.json" \
+    'Bash(ls:*)' \
+    'Bash(echo hello)'
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  [ -z "$STDOUT" ]
+  [ -z "$STDERR" ]
+}
+
+@test "session-start: partial coverage -> hint fires with remaining count" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(pwd:*)","Bash(echo ok)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  # Only Bash(ls:*) imported.
+  make_imported_allow_hash_only \
+    "$USER_ROOT/.claude/passthru.imported.json" \
+    'Bash(ls:*)'
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 2
+}
+
+@test "session-start: project-scope imported coverage silences the hint" {
+  # User settings has entries; project imported.json covers them all.
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  make_imported_allow_hash_only \
+    "$PROJ_ROOT/.claude/passthru.imported.json" \
+    'Bash(ls:*)'
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  [ -z "$STDOUT" ]
+}
+
+# ---------------------------------------------------------------------------
+# Authored passthru.json does NOT gate the hint (that was the old behavior).
+# ---------------------------------------------------------------------------
+
+@test "session-start: authored passthru.json does not gate the hint" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  # User hand-authored a rule (unrelated to the importable entry).
+  cat > "$USER_ROOT/.claude/passthru.json" <<'JSON'
+{
+  "version": 1,
+  "allow": [{"tool":"^Bash$","match":{"command":"^make\\b"},"reason":"hand"}],
+  "deny": []
+}
+JSON
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+# ---------------------------------------------------------------------------
+# Project-scope settings contribute too
+# ---------------------------------------------------------------------------
+
+@test "session-start: project settings entries count toward the hint" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$PROJ_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+@test "session-start: project settings.local.json entries count toward the hint" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$PROJ_ROOT/.claude/settings.local.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+@test "session-start: identical entries in multiple settings files dedup to one hash" {
+  # Same entry in user and project settings -> one hash, count 1.
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$PROJ_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+# ---------------------------------------------------------------------------
+# Malformed inputs -> fail open, no crash
+# ---------------------------------------------------------------------------
+
+@test "session-start: malformed stdin -> exit 0, hint still fires if conditions met" {
   printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
     > "$USER_ROOT/.claude/settings.json"
 
   run_handler 'not-json{{{'
   [ "$status" -eq 0 ]
-  # The hint should still fire (stdin is redirected to /dev/null, never parsed).
-  assert_hint_envelope
-  # Marker must still be touched since nothing else went wrong.
-  [ -f "$(marker_path)" ]
+  # stdin is /dev/null'd, so the hint still fires.
+  assert_hint_envelope 1
 }
 
-@test "session-start: empty stdin -> exit 0, no crash" {
+@test "session-start: empty stdin -> exit 0, hint fires if conditions met" {
   printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
     > "$USER_ROOT/.claude/settings.json"
 
   run_handler ''
   [ "$status" -eq 0 ]
-  assert_hint_envelope
-  [ -f "$(marker_path)" ]
+  assert_hint_envelope 1
 }
 
-# ---------------------------------------------------------------------------
-# Malformed settings.json -> treat as zero, still mark, no hint, no crash.
-# ---------------------------------------------------------------------------
-
-@test "session-start: malformed settings.json -> marker created, no hint, exit 0" {
+@test "session-start: malformed settings.json -> silent, no crash" {
   printf 'not-json{' > "$USER_ROOT/.claude/settings.json"
 
   run_handler '{}'
   [ "$status" -eq 0 ]
   [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
-  [ -f "$(marker_path)" ]
+}
+
+@test "session-start: malformed imported.json -> hint still fires (treated as empty)" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  printf 'not-json{' > "$USER_ROOT/.claude/passthru.imported.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  # imported yields no hashes, so the settings hash is un-covered.
+  assert_hint_envelope 1
+}
+
+# ---------------------------------------------------------------------------
+# Legacy marker file - no longer used
+# ---------------------------------------------------------------------------
+
+@test "session-start: legacy marker file does NOT suppress the hint" {
+  # Old behavior: marker gated the hint. New behavior: the marker is ignored.
+  touch "$USER_ROOT/.claude/passthru.bootstrap-hint-shown"
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  assert_hint_envelope 1
+}
+
+@test "session-start: handler does not create the legacy marker file" {
+  # Confirms the old marker-touch logic is gone.
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_handler '{}'
+  [ "$status" -eq 0 ]
+  [ ! -e "$USER_ROOT/.claude/passthru.bootstrap-hint-shown" ]
 }

@@ -91,6 +91,191 @@ audit_enabled() {
   [ -e "$sentinel" ]
 }
 
+# ---------------------------------------------------------------------------
+# Settings entry helpers (used by bootstrap + session-start hint)
+# ---------------------------------------------------------------------------
+#
+# is_importable_entry <raw>
+#   Returns 0 if bootstrap.sh's `convert_rule` would produce a rule for the
+#   given native permission entry. Returns 1 otherwise. Single source of
+#   truth so the session-start hash diff never drifts from what bootstrap
+#   actually imports. Intentionally silent: no stdout, no stderr.
+#
+# Shapes accepted (must match convert_rule in scripts/bootstrap.sh):
+#   Bash(<prefix>:*)                  -> importable when prefix non-empty
+#   Bash(<exact command>)             -> importable when no embedded newline
+#   WebFetch(domain:<domain>)         -> importable when domain non-empty
+#   WebSearch                         -> importable (bare)
+#   mcp__...                          -> importable when no parens
+#   Read/Edit/Write(<path>[/**|/*])   -> importable when path passes
+#                                       bootstrap's path-shape checks
+#   Skill(<name>)                     -> importable when name non-empty
+#
+# Anything else returns 1.
+is_importable_entry() {
+  local raw="$1"
+
+  # Trim whitespace (mirrors convert_rule).
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+
+  [ -z "$raw" ] && return 1
+
+  # Bash(...)
+  if [[ "$raw" == Bash\(*\) ]]; then
+    local inner="${raw#Bash(}"
+    inner="${inner%)}"
+    if [[ "$inner" == *:\* ]]; then
+      local prefix="${inner%:\*}"
+      [ -z "$prefix" ] && return 1
+      return 0
+    fi
+    # Exact Bash command: reject embedded newline.
+    [[ "$inner" == *$'\n'* ]] && return 1
+    return 0
+  fi
+
+  # WebFetch(domain:...)
+  if [[ "$raw" == WebFetch\(domain:*\) ]]; then
+    local domain="${raw#WebFetch(domain:}"
+    domain="${domain%)}"
+    domain="${domain#"${domain%%[![:space:]]*}"}"
+    domain="${domain%"${domain##*[![:space:]]}"}"
+    [ -z "$domain" ] && return 1
+    return 0
+  fi
+
+  # WebFetch(...) other than domain form: unsupported.
+  if [[ "$raw" == WebFetch\(*\) ]]; then
+    return 1
+  fi
+
+  # mcp__... (no parens)
+  if [[ "$raw" == mcp__* ]]; then
+    [[ "$raw" == *"("* ]] && return 1
+    [[ "$raw" == *")"* ]] && return 1
+    return 0
+  fi
+
+  # WebSearch (bare)
+  if [ "$raw" = "WebSearch" ]; then
+    return 0
+  fi
+
+  # Read/Edit/Write(<path>)
+  if [[ "$raw" == Read\(*\) ]] || [[ "$raw" == Edit\(*\) ]] || [[ "$raw" == Write\(*\) ]]; then
+    local tool_name="${raw%%(*}"
+    local inner="${raw#${tool_name}(}"
+    inner="${inner%)}"
+    [ -z "$inner" ] && return 1
+    # Shell / env expansion syntax: $, ${}, $(), %VAR%.
+    [[ "$inner" == *'$'* ]] && return 1
+    [[ "$inner" == *'%'* ]] && return 1
+    # Leading = (zsh equals expansion).
+    [[ "$inner" == =* ]] && return 1
+    # UNC path.
+    [[ "$inner" == '\\'* ]] && return 1
+    # Tilde variants other than `~/` and bare `~`.
+    if [ "$inner" = '~' ]; then
+      return 0
+    fi
+    if [ "${inner:0:2}" = "~/" ]; then
+      return 0
+    fi
+    if [ "${inner:0:1}" = "~" ]; then
+      return 1
+    fi
+    return 0
+  fi
+
+  # Skill(<name>)
+  if [[ "$raw" == Skill\(*\) ]]; then
+    local name="${raw#Skill(}"
+    name="${name%)}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    [ -z "$name" ] && return 1
+    return 0
+  fi
+
+  return 1
+}
+
+# normalize_settings_entry <entry>
+#   Emits the entry with leading/trailing whitespace stripped. No lowercasing
+#   (Claude Code's permission parser is case-sensitive - `Bash` != `bash`),
+#   no path collapsing, no reformatting. The single contract: two entries
+#   that differ only by surrounding whitespace hash identically.
+normalize_settings_entry() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# hash_settings_entry <entry>
+#   Emits sha256 hex of normalize_settings_entry(<entry>) on stdout.
+#   Empty on error (missing hashing tools). Uses the same shasum/sha256sum
+#   detection as passthru_sha256 but hashes stdin content instead of a path.
+hash_settings_entry() {
+  local normalized
+  normalized="$(normalize_settings_entry "$1")"
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$normalized" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$normalized" | sha256sum 2>/dev/null | awk '{print $1}'
+  fi
+}
+
+# settings_importable_hashes
+#   Scans every settings file (user + project shared/local) and emits one
+#   hash per line for each `permissions.allow[]` string that passes
+#   `is_importable_entry`. No output for missing files or empty allow
+#   arrays. Malformed JSON files are silently skipped - the session-start
+#   handler's job is nudging, not fault-reporting.
+settings_importable_hashes() {
+  local user_home project_dir
+  user_home="$(passthru_user_home)"
+  project_dir="${PASSTHRU_PROJECT_DIR:-$PWD}"
+
+  local files=(
+    "$user_home/.claude/settings.json"
+    "$project_dir/.claude/settings.json"
+    "$project_dir/.claude/settings.local.json"
+  )
+
+  local f entry
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
+    # Parse check is implicit: jq's error path returns no rows.
+    # Only string entries count (matches bootstrap's filter).
+    while IFS= read -r entry || [ -n "$entry" ]; do
+      [ -z "$entry" ] && continue
+      if is_importable_entry "$entry"; then
+        hash_settings_entry "$entry"
+      fi
+    done < <(jq -r '(.permissions.allow // []) | map(select(type == "string")) | .[]' "$f" 2>/dev/null)
+  done
+}
+
+# imported_hashes
+#   Scans every passthru.imported.json file (user + project) and emits each
+#   present `_source_hash` value on its own line. Rules without the field
+#   contribute nothing (legacy pre-hash files silently force the hint to
+#   re-fire until bootstrap rewrites them).
+imported_hashes() {
+  local user_imported project_imported
+  user_imported="$(passthru_user_imported_path)"
+  project_imported="$(passthru_project_imported_path)"
+
+  local f
+  for f in "$user_imported" "$project_imported"; do
+    [ -f "$f" ] || continue
+    jq -r '(.allow // []) | map(select(._source_hash != null and (._source_hash | type == "string"))) | .[]._source_hash' \
+      "$f" 2>/dev/null
+  done
+}
+
 # audit_log_path: path to ~/.claude/passthru-audit.log (may not exist).
 audit_log_path() {
   printf '%s/.claude/passthru-audit.log\n' "$(passthru_user_home)"

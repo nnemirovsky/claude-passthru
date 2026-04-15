@@ -155,10 +155,17 @@ domain_escape() {
 # Prints a single-line JSON object on success, nothing on skip.
 # Prints a `[WARN] ...` message to stderr on unsupported forms.
 # Returns 0 always (caller handles empty output).
+#
+# Every successful conversion embeds `_source_hash` (sha256 of the
+# whitespace-normalized raw entry) so the session-start hint helper can
+# diff settings entries against imported rules without re-running the
+# converter. Single source of truth: uses hash_settings_entry from
+# common.sh.
 # ---------------------------------------------------------------------------
 convert_rule() {
   local raw="$1"
   local json=""
+  local source_hash
 
   # Strip leading/trailing whitespace.
   raw="${raw#"${raw%%[![:space:]]*}"}"
@@ -167,6 +174,10 @@ convert_rule() {
   if [ -z "$raw" ]; then
     return 0
   fi
+
+  # Hash BEFORE any conversion so the stored value matches exactly what
+  # settings_importable_hashes computes on the same entry.
+  source_hash="$(hash_settings_entry "$raw")"
 
   # Match Bash(...) form, captured inner content stripped of the outer parens.
   if [[ "$raw" == Bash\(*\) ]]; then
@@ -191,7 +202,8 @@ convert_rule() {
       escaped="$(regex_escape "$prefix")"
       json="$(jq -cn \
         --arg cmd "^${escaped}(\\s|\$)" \
-        '{tool:"Bash", match:{command:$cmd}, reason:"imported from settings"}')"
+        --arg hash "$source_hash" \
+        '{tool:"Bash", match:{command:$cmd}, reason:"imported from settings", _source_hash:$hash}')"
     else
       # Exact Bash command: accept only if it looks like a sane shell line (no
       # embedded newlines). Convert to an anchored regex.
@@ -203,7 +215,8 @@ convert_rule() {
       escaped="$(regex_escape "$inner")"
       json="$(jq -cn \
         --arg cmd "^${escaped}\$" \
-        '{tool:"Bash", match:{command:$cmd}, reason:"imported from settings"}')"
+        --arg hash "$source_hash" \
+        '{tool:"Bash", match:{command:$cmd}, reason:"imported from settings", _source_hash:$hash}')"
     fi
 
   elif [[ "$raw" == WebFetch\(domain:*\) ]]; then
@@ -227,7 +240,8 @@ convert_rule() {
     # which the native `WebFetch(domain:x.com)` rule does cover.
     json="$(jq -cn \
       --arg url "^https?://([^/.]+\\.)*${escaped_domain}([/:?#]|\$)" \
-      '{tool:"WebFetch", match:{url:$url}, reason:"imported from settings"}')"
+      --arg hash "$source_hash" \
+      '{tool:"WebFetch", match:{url:$url}, reason:"imported from settings", _source_hash:$hash}')"
 
   elif [[ "$raw" == WebFetch\(*\) ]]; then
     printf '[WARN] skipping WebFetch rule with unsupported form: %s\n' "$raw" >&2
@@ -243,12 +257,14 @@ convert_rule() {
     escaped="$(regex_escape "$raw")"
     json="$(jq -cn \
       --arg tool "^${escaped}\$" \
-      '{tool:$tool, reason:"imported from settings"}')"
+      --arg hash "$source_hash" \
+      '{tool:$tool, reason:"imported from settings", _source_hash:$hash}')"
 
   elif [[ "$raw" == "WebSearch" ]]; then
     # Bare WebSearch native rule allows any query. No match block.
     json="$(jq -cn \
-      '{tool:"^WebSearch$", reason:"imported from settings"}')"
+      --arg hash "$source_hash" \
+      '{tool:"^WebSearch$", reason:"imported from settings", _source_hash:$hash}')"
 
   elif [[ "$raw" == Read\(*\) ]] || [[ "$raw" == Edit\(*\) ]] || [[ "$raw" == Write\(*\) ]]; then
     # File-path-based native rules. Detect the tool name, then inspect the
@@ -344,7 +360,8 @@ convert_rule() {
     json="$(jq -cn \
       --arg tool "^${tool_name}\$" \
       --arg fp "$path_re" \
-      '{tool:$tool, match:{file_path:$fp}, reason:"imported from settings"}')"
+      --arg hash "$source_hash" \
+      '{tool:$tool, match:{file_path:$fp}, reason:"imported from settings", _source_hash:$hash}')"
 
   elif [[ "$raw" == Skill\(*\) ]]; then
     # Skill(<name>) -> exact-match the skill identifier.
@@ -360,7 +377,8 @@ convert_rule() {
     escaped="$(regex_escape "$name")"
     json="$(jq -cn \
       --arg skill "^${escaped}\$" \
-      '{tool:"^Skill$", match:{skill:$skill}, reason:"imported from settings"}')"
+      --arg hash "$source_hash" \
+      '{tool:"^Skill$", match:{skill:$skill}, reason:"imported from settings", _source_hash:$hash}')"
 
   else
     printf '[WARN] skipping unknown rule format: %s\n' "$raw" >&2
