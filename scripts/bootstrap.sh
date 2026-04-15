@@ -16,6 +16,12 @@
 #   mcp__server__tool         -> {tool:"^mcp__server__tool$"}
 #   WebFetch(domain:x.com)    -> {tool:"WebFetch",
 #                                 match:{url:"^https?://([^/.]+\\.)*x\\.com([/:?#]|$)"}}
+#   WebSearch                 -> {tool:"^WebSearch$"}
+#   Read(<path>/**)           -> {tool:"^Read$", match:{file_path:"^<escaped>(/|$)"}}
+#   Read(<path>)              -> {tool:"^Read$", match:{file_path:"^<escaped>$"}}
+#   Edit(<path>[/**])         -> same shape as Read
+#   Write(<path>[/**])        -> same shape as Read
+#   Skill(<name>)             -> {tool:"^Skill$", match:{skill:"^<escaped>$"}}
 #
 # Unknown shapes (rules with spaces past the prefix, unrecognized forms) are
 # skipped with a warning printed to stderr.
@@ -233,6 +239,60 @@ convert_rule() {
     json="$(jq -cn \
       --arg tool "^${escaped}\$" \
       '{tool:$tool, reason:"imported from settings"}')"
+
+  elif [[ "$raw" == "WebSearch" ]]; then
+    # Bare WebSearch native rule allows any query. No match block.
+    json="$(jq -cn \
+      '{tool:"^WebSearch$", reason:"imported from settings"}')"
+
+  elif [[ "$raw" == Read\(*\) ]] || [[ "$raw" == Edit\(*\) ]] || [[ "$raw" == Write\(*\) ]]; then
+    # File-path-based native rules. Detect the tool name, then inspect the
+    # inner path for a trailing glob suffix (`/**` or `/*`). A glob suffix
+    # means "anything under this directory"; without it the path is an
+    # exact-file match.
+    local tool_name="${raw%%(*}"
+    local inner="${raw#${tool_name}(}"
+    inner="${inner%)}"
+    if [ -z "$inner" ]; then
+      printf '[WARN] skipping %s rule with empty path: %s\n' "$tool_name" "$raw" >&2
+      return 0
+    fi
+    local path_re
+    if [[ "$inner" == */\*\* ]]; then
+      local prefix="${inner%/\*\*}"
+      local escaped
+      escaped="$(regex_escape "$prefix")"
+      path_re="^${escaped}(/|\$)"
+    elif [[ "$inner" == */\* ]]; then
+      local prefix="${inner%/\*}"
+      local escaped
+      escaped="$(regex_escape "$prefix")"
+      path_re="^${escaped}(/|\$)"
+    else
+      local escaped
+      escaped="$(regex_escape "$inner")"
+      path_re="^${escaped}\$"
+    fi
+    json="$(jq -cn \
+      --arg tool "^${tool_name}\$" \
+      --arg fp "$path_re" \
+      '{tool:$tool, match:{file_path:$fp}, reason:"imported from settings"}')"
+
+  elif [[ "$raw" == Skill\(*\) ]]; then
+    # Skill(<name>) -> exact-match the skill identifier.
+    local name="${raw#Skill(}"
+    name="${name%)}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    if [ -z "$name" ]; then
+      printf '[WARN] skipping Skill rule with empty name: %s\n' "$raw" >&2
+      return 0
+    fi
+    local escaped
+    escaped="$(regex_escape "$name")"
+    json="$(jq -cn \
+      --arg skill "^${escaped}\$" \
+      '{tool:"^Skill$", match:{skill:$skill}, reason:"imported from settings"}')"
 
   else
     printf '[WARN] skipping unknown rule format: %s\n' "$raw" >&2

@@ -114,7 +114,7 @@ run_boot() {
   cp "$FIXTURES/settings-with-allow.json" "$PROJ_ROOT/.claude/settings.local.json"
   run bash -c "bash '$BOOTSTRAP' 2>&1 >/dev/null"
   [[ "$output" == *"[WARN]"* ]]
-  [[ "$output" == *"Read(/tmp/foo)"* ]] || [[ "$output" == *"ExactStrangeFormat"* ]]
+  [[ "$output" == *"ExactStrangeFormat"* ]]
 }
 
 @test "bootstrap: --write persists converted rules to project .imported.json" {
@@ -123,8 +123,8 @@ run_boot() {
   [ "$status" -eq 0 ]
   [ -f "$(proj_imported)" ]
   run jq -r '.allow | length' "$(proj_imported)"
-  # fixture has 13 entries, 2 skipped (Read, ExactStrangeFormat) -> 11 kept
-  [ "$output" = "11" ]
+  # fixture has 18 entries, 1 skipped (ExactStrangeFormat) -> 17 kept
+  [ "$output" = "17" ]
 }
 
 @test "bootstrap: dry-run output matches --write file content (schema-wise)" {
@@ -464,4 +464,163 @@ EOF
   [ "$output" = "1" ]
   run jq -r '.allow[0].match.command' "$(user_imported)"
   [ "$output" = "^ls(\\s|\$)" ]
+}
+
+# ---------------------------------------------------------------------------
+# WebSearch converter
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: WebSearch converts to ^WebSearch$ tool rule with no match block" {
+  printf '{"permissions":{"allow":["WebSearch"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "1" ]
+  run jq -r '.allow[0].tool' "$(user_imported)"
+  [ "$output" = "^WebSearch\$" ]
+  # No match block should be present.
+  run jq -r '.allow[0] | has("match")' "$(user_imported)"
+  [ "$output" = "false" ]
+}
+
+# ---------------------------------------------------------------------------
+# Read/Edit/Write file_path converters
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: Read(/tmp/foo/**) converts to Read tool with prefix regex" {
+  printf '{"permissions":{"allow":["Read(/tmp/foo/**)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow[0].tool' "$(user_imported)"
+  [ "$output" = "^Read\$" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # Must match /tmp/foo and everything under it.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/tmp/foo' "$pat"
+  [ "$status" -eq 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/tmp/foo/bar' "$pat"
+  [ "$status" -eq 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/tmp/foo/bar/baz' "$pat"
+  [ "$status" -eq 0 ]
+  # Must NOT match /tmp/foobar (sibling with same prefix).
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/tmp/foobar' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap: Read(/etc/hosts) converts to exact file_path match" {
+  printf '{"permissions":{"allow":["Read(/etc/hosts)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow[0].tool' "$(user_imported)"
+  [ "$output" = "^Read\$" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # Must match exactly.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/etc/hosts' "$pat"
+  [ "$status" -eq 0 ]
+  # Must NOT match /etc/hosts.bak or subpaths.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/etc/hosts.bak' "$pat"
+  [ "$status" -ne 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/etc/hosts/sub' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap: Edit(/path) converts with same file_path shape as Read" {
+  printf '{"permissions":{"allow":["Edit(/var/log/app.log)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow[0].tool' "$(user_imported)"
+  [ "$output" = "^Edit\$" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/var/log/app.log' "$pat"
+  [ "$status" -eq 0 ]
+}
+
+@test "bootstrap: Write(/path/**) converts to Write prefix regex" {
+  printf '{"permissions":{"allow":["Write(/tmp/out/**)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow[0].tool' "$(user_imported)"
+  [ "$output" = "^Write\$" ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/tmp/out/file.txt' "$pat"
+  [ "$status" -eq 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/tmp/output' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+@test "bootstrap: Read path with regex metachars (dots, asterisks) is escaped" {
+  # A literal path with regex metacharacters (dot, asterisk) must be escaped
+  # so the resulting pattern matches only the literal path and does not
+  # admit anything a greedy reader would allow.
+  printf '{"permissions":{"allow":["Read(/a.b/c*/**)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  pat="$(jq -r '.allow[0].match.file_path' "$(user_imported)")"
+  # Must match the literal path.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/a.b/c*' "$pat"
+  [ "$status" -eq 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/a.b/c*/file' "$pat"
+  [ "$status" -eq 0 ]
+  # Must NOT match paths that only pass because dots and asterisks were
+  # treated as regex operators.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/aXb/cZZ' "$pat"
+  [ "$status" -ne 0 ]
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/a/b/c/file' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Skill converter
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: Skill(revdiff) converts to ^Skill$ with {skill: ^revdiff$}" {
+  printf '{"permissions":{"allow":["Skill(revdiff)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow[0].tool' "$(user_imported)"
+  [ "$output" = "^Skill\$" ]
+  run jq -r '.allow[0].match.skill' "$(user_imported)"
+  [ "$output" = "^revdiff\$" ]
+}
+
+@test "bootstrap: Skill name with metachars is escaped" {
+  printf '{"permissions":{"allow":["Skill(my.skill*)"]}}\n' > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  pat="$(jq -r '.allow[0].match.skill' "$(user_imported)")"
+  # Must match literal name only.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'my.skill*' "$pat"
+  [ "$status" -eq 0 ]
+  # Must NOT match a name that only passes because . or * were unescaped.
+  run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' 'myXskill' "$pat"
+  [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Regressions: Bash, MCP, WebFetch still convert with the new converters added.
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: Bash/MCP/WebFetch conversions still work alongside new converters" {
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{"permissions":{"allow":[
+  "Bash(git status:*)",
+  "Bash(echo hello)",
+  "mcp__context7__query-docs",
+  "WebFetch(domain:docs.anthropic.com)",
+  "WebSearch",
+  "Read(/tmp/foo/**)",
+  "Skill(revdiff)"
+]}}
+EOF
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_imported)"
+  [ "$output" = "7" ]
+  # Spot-check each shape.
+  run jq -r '[.allow[].tool] | sort | join(",")' "$(user_imported)"
+  [[ "$output" == *'Bash'* ]]
+  [[ "$output" == *'WebFetch'* ]]
+  [[ "$output" == *'^WebSearch$'* ]]
+  [[ "$output" == *'^Read$'* ]]
+  [[ "$output" == *'^Skill$'* ]]
+  [[ "$output" == *'^mcp__context7__query\-docs$'* ]]
 }

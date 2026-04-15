@@ -33,7 +33,9 @@ hooks/
                        marker. Prints to stderr only when the user has no passthru files yet
                        AND has importable entries in ~/.claude/settings.json.
 scripts/
-  bootstrap.sh         one-time importer from native permissions.allow into passthru.imported.json
+  bootstrap.sh         one-time importer from native permissions.allow into passthru.imported.json.
+                       Supported shapes: Bash(prefix:*) | Bash(exact) | mcp__* | WebFetch(domain:X)
+                       | WebSearch | Read/Edit/Write(path[/**]) | Skill(name). Others -> [WARN] skip.
   write-rule.sh        atomic write wrapper: backup + append + verify + rollback
   verify.sh            rule verifier CLI (also invoked by write-rule.sh and /passthru:verify)
   log.sh               audit-log viewer CLI + sentinel toggle
