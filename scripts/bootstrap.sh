@@ -28,8 +28,8 @@
 #
 # Read/Edit/Write paths that use shell expansion (`$VAR`, `${VAR}`, `$(cmd)`,
 # `%VAR%`), zsh equals expansion (`=cmd`), tilde variants other than `~/`
-# (`~user`, `~+`, `~-`), or UNC (`\\server\share`) are skipped. This mirrors
-# Claude Code's own path validation rules.
+# (`~user`, `~+`, `~-`), or UNC (`\\server\share`) are skipped.
+# Permissive path validation (accept shapes the upstream host accepts).
 #
 # Flags:
 #   --write            actually write; default is a dry-run that prints JSON to stdout.
@@ -272,9 +272,8 @@ convert_rule() {
     # means "anything under this directory"; without it the path is an
     # exact-file match.
     #
-    # Acceptance mirrors Claude Code's actual path validation
-    # (src/utils/permissions/pathValidation.ts). Only the shapes that Claude
-    # Code itself rejects are skipped here:
+    # Only clearly invalid path shapes are skipped (empty, bare relative).
+    # The following forms are rejected here:
     #   * Unix shell expansion:   `$VAR`, `${VAR}`, `$(cmd)`
     #   * Windows env expansion:  `%VAR%`
     #   * Zsh equals expansion:   leading `=`
