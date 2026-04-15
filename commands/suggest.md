@@ -6,14 +6,14 @@ argument-hint: "[tool-or-command-hint]"
 # /passthru:suggest
 
 Propose a passthru regex rule generalized from a recent tool call. Use this
-after a native permission dialog fires for a tool call you want to auto-allow
-(or auto-deny) going forward, without hand-editing `passthru.json`.
+after a native permission dialog fires for a tool call you want to auto-allow,
+always-ask, or auto-deny going forward, without hand-editing `passthru.json`.
 
 The plugin's `PreToolUse` hook evaluates passthru rules on every tool call and
-auto-allows or auto-denies matching calls. This command proposes a rule,
-explains the regex, shows matched/non-matched examples, and on your
-confirmation hands the rule off to `scripts/write-rule.sh` (the same atomic
-write path used by `/passthru:add`).
+auto-allows, routes through the ask path, or auto-denies matching calls. This
+command proposes a rule, explains the regex, shows matched/non-matched
+examples, and on your confirmation hands the rule off to `scripts/write-rule.sh`
+(the same atomic write path used by `/passthru:add`).
 
 ## What you must do
 
@@ -114,7 +114,12 @@ interactive context; otherwise ask inline and wait for a reply):
    (applies only inside the current project). Default: `user` when the
    command is clearly tool-class-wide (e.g., `gh api /repos/`), `project`
    when the regex embeds a specific project path.
-2. **Allow or deny**: `allow` (default) or `deny`.
+2. **Allow, ask, or deny**: pick one of the three. Default: `allow`.
+   - `allow` - matching calls auto-allow (bypasses the native dialog).
+   - `ask` - matching calls always route through the permission prompt
+     (the overlay when enabled, otherwise the native Claude Code dialog).
+     Use this when you want explicit confirmation every time.
+   - `deny` - matching calls auto-deny.
 3. **Confirmation**: "write this rule?" - do not proceed on ambiguous
    answers. Re-ask or abort.
 
@@ -127,8 +132,14 @@ On confirmation, build the final JSON with `jq -n --arg ...` (avoid string
 concatenation), then run exactly:
 
 ```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/write-rule.sh <scope> <allow|deny> '<rule_json>'
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/write-rule.sh <scope> <allow|ask|deny> '<rule_json>'
 ```
+
+Pick the list based on the step 4 answer:
+
+- allow -> `allow`
+- ask -> `ask`
+- deny -> `deny`
 
 Single-quote the rule JSON. Do not interpolate the JSON into the shell any
 other way.

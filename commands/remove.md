@@ -23,7 +23,7 @@ Do not invent behaviour. Surface errors verbatim.
 Three positional tokens are required, in this order:
 
 1. `scope` - must be `user` or `project`.
-2. `list` - must be `allow` or `deny`.
+2. `list` - must be `allow`, `ask`, or `deny`.
 3. `index` - positive integer, 1-based, from the `#` column of
    `/passthru:list` under the matching `(scope, list, authored-source)`
    group.
@@ -80,6 +80,12 @@ violation.
 
   ```
   /passthru:remove project deny 1
+  ```
+
+* Remove the 2nd authored ask rule from the user scope:
+
+  ```
+  /passthru:remove user ask 2
   ```
 
 * Typical workflow:

@@ -185,6 +185,21 @@ frontmatter_value() {
   [ "$status" -eq 0 ]
 }
 
+@test "commands/suggest.md body mentions ask as a third option" {
+  # Task 5: after regex confirmation, suggest offers allow/ask/deny.
+  # The body must mention ask alongside allow and deny so the
+  # write-rule.sh invocation supports routing to the ask list.
+  run grep -qi 'ask' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions the three-way list target in write-rule.sh" {
+  # The write-rule.sh invocation line must advertise allow|ask|deny as the
+  # list options so Claude picks the right one at runtime.
+  run grep -qE 'allow\|ask\|deny|allow.*ask.*deny' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
 @test "commands/suggest.md body mentions \$ARGUMENTS hint" {
   run grep -q 'ARGUMENTS' "$COMMANDS_DIR/suggest.md"
   [ "$status" -eq 0 ]
@@ -441,6 +456,25 @@ frontmatter_value() {
   [[ "$output" == *"--tool"* ]]
 }
 
+@test "commands/list.md frontmatter argument-hint mentions ask as a --list value" {
+  # Task 5: ask is documented alongside allow/deny in the --list argument
+  # so shell completion and help text surface the third list target.
+  run frontmatter_value "$COMMANDS_DIR/list.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ask"* ]]
+}
+
+@test "commands/list.md body mentions the ask filter" {
+  # Task 5: the body explains ask as a --list filter value.
+  run grep -q 'ask' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md body includes a --list ask example" {
+  run grep -q 'passthru:list --list ask' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
 @test "commands/list.md body mentions list.sh" {
   run grep -q "list.sh" "$COMMANDS_DIR/list.md"
   [ "$status" -eq 0 ]
@@ -499,6 +533,17 @@ frontmatter_value() {
   [[ "$output" == *"scope"* ]]
   [[ "$output" == *"list"* ]]
   [[ "$output" == *"index"* ]]
+}
+
+@test "commands/remove.md body mentions ask as a valid list value" {
+  # Task 5: remove accepts ask as a list argument alongside allow/deny.
+  run grep -q 'ask' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body includes a worked ask example" {
+  run grep -q 'passthru:remove user ask' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
 }
 
 @test "commands/remove.md body mentions remove-rule.sh" {

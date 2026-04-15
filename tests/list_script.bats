@@ -538,3 +538,144 @@ EOF
   [[ "$output" == *"no sudo"* ]]
   [[ "$output" == *"project reads"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# ask[] support (schema v2)
+# ---------------------------------------------------------------------------
+
+write_fixture_with_ask() {
+  # User authored: 1 allow + 1 ask + 1 deny (schema v2).
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    {"tool": "Bash", "match": {"command": "^gh api /repos/"}, "reason": "github repo api"}
+  ],
+  "ask": [
+    {"tool": "WebFetch", "match": {"url": "^https?://unsafe\\."}, "reason": "prompt on unsafe"}
+  ],
+  "deny": [
+    {"tool": "Bash", "match": {"command": "rm\\s+-rf\\s+/"}, "reason": "safety"}
+  ]
+}
+EOF
+}
+
+@test "list: default output renders an ASK group when ask[] has rules" {
+  write_fixture_with_ask
+  run_list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"USER / ask (authored"* ]]
+  [[ "$output" == *"prompt on unsafe"* ]]
+  # Allow and deny groups still rendered.
+  [[ "$output" == *"USER / allow (authored"* ]]
+  [[ "$output" == *"USER / deny (authored"* ]]
+}
+
+@test "list: --list ask filters to ask-only output" {
+  write_fixture_with_ask
+  run_list --list ask
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"USER / ask (authored"* ]]
+  [[ "$output" == *"prompt on unsafe"* ]]
+  # Allow and deny groups must be absent.
+  [[ "$output" != *"USER / allow"* ]]
+  [[ "$output" != *"USER / deny"* ]]
+  [[ "$output" != *"github repo api"* ]]
+  [[ "$output" != *"safety"* ]]
+}
+
+@test "list: --list all includes the ask group alongside allow and deny" {
+  write_fixture_with_ask
+  run_list --list all
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"USER / allow (authored"* ]]
+  [[ "$output" == *"USER / ask (authored"* ]]
+  [[ "$output" == *"USER / deny (authored"* ]]
+  # Reasons from every list visible.
+  [[ "$output" == *"github repo api"* ]]
+  [[ "$output" == *"prompt on unsafe"* ]]
+  [[ "$output" == *"safety"* ]]
+}
+
+@test "list: --list ask on file with no ask[] -> 'no rules found', exit 0" {
+  # A v1 fixture with no ask[] array at all.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 1,
+  "allow": [{"tool": "Bash", "match": {"command": "^ls"}}],
+  "deny": []
+}
+EOF
+  run_list --list ask
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no rules found"* ]]
+}
+
+@test "list: grouped ASK header uses a distinct ANSI color from ALLOW and DENY" {
+  # Assert the three list colors are distinct. Don't rely on tty detection
+  # (bats captures stdout, so -t 1 is false inside run). Instead, extract
+  # the color_for_list function block from list.sh and eval it in a subshell
+  # so we can compare the actual emitted bytes. The isolated-color assertion
+  # avoids pinning to specific ANSI codes so future color tweaks don't break
+  # the test as long as the three values remain distinct.
+  local fn_src
+  fn_src="$(awk '/^color_for_list\(\)/{f=1} f{print} f && /^}$/{exit}' "$LIST_SCRIPT")"
+  [ -n "$fn_src" ]
+  local allow_code deny_code ask_code
+  allow_code="$(bash -c "$fn_src; color_for_list allow" | od -An -c | tr -d ' \n')"
+  deny_code="$(bash -c "$fn_src; color_for_list deny"  | od -An -c | tr -d ' \n')"
+  ask_code="$(bash -c "$fn_src; color_for_list ask"    | od -An -c | tr -d ' \n')"
+  [ -n "$allow_code" ]
+  [ -n "$deny_code" ]
+  [ -n "$ask_code" ]
+  # All three must differ pairwise.
+  [ "$ask_code" != "$allow_code" ]
+  [ "$ask_code" != "$deny_code" ]
+  [ "$allow_code" != "$deny_code" ]
+}
+
+@test "list: --flat mode renders 'ask' in the list column for ask rules" {
+  write_fixture_with_ask
+  run_list --flat
+  [ "$status" -eq 0 ]
+  # A data row should begin with "user" then "ask" in the list column.
+  # Column spacing is deterministic: %-8s %-6s %-9s ...
+  printf '%s\n' "$output" | grep -qE '^user[[:space:]]+ask[[:space:]]+authored'
+  # Allow and deny rows also present.
+  printf '%s\n' "$output" | grep -qE '^user[[:space:]]+allow[[:space:]]+authored'
+  printf '%s\n' "$output" | grep -qE '^user[[:space:]]+deny[[:space:]]+authored'
+}
+
+@test "list: --format json includes ask entries when --list ask" {
+  write_fixture_with_ask
+  run_list --format json --list ask
+  [ "$status" -eq 0 ]
+  # Exactly one ask rule in the fixture.
+  local n
+  n="$(printf '%s' "$output" | jq 'length')"
+  [ "$n" -eq 1 ]
+  # The single entry has list=ask.
+  printf '%s' "$output" | jq -e '.[0].list == "ask"' >/dev/null
+  # Its rule carries the expected tool.
+  printf '%s' "$output" | jq -e '.[0].rule.tool == "WebFetch"' >/dev/null
+}
+
+@test "list: --format json --list all surfaces ask alongside allow and deny" {
+  write_fixture_with_ask
+  run_list --format json --list all
+  [ "$status" -eq 0 ]
+  # 3 rules total: 1 allow, 1 ask, 1 deny.
+  local n
+  n="$(printf '%s' "$output" | jq 'length')"
+  [ "$n" -eq 3 ]
+  # All three list values appear exactly once.
+  printf '%s' "$output" | jq -e '[.[].list] | sort == ["allow","ask","deny"]' >/dev/null
+}
+
+@test "list: invalid --list 'ask' spelled wrong still exits 2" {
+  # Sanity: the allowed values remain a closed set.
+  run_list --list aks
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"invalid --list"* ]]
+}

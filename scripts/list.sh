@@ -9,7 +9,7 @@
 #
 # Flags (see --help):
 #   --scope user|project|all    default all
-#   --list allow|deny|all       default all
+#   --list allow|deny|ask|all   default all
 #   --source authored|imported|all   default all
 #   --tool <regex>              perl regex on .tool field
 #   --format table|json|raw     default table
@@ -50,7 +50,7 @@ List passthru rules across user and project scopes with annotations.
 
 Options:
   --scope user|project|all    default all
-  --list allow|deny|all       default all
+  --list allow|deny|ask|all   default all (ask rules are included in "all")
   --source authored|imported|all   default all
   --tool <regex>              perl regex on .tool field
   --format table|json|raw     default table
@@ -92,7 +92,7 @@ while [ $# -gt 0 ]; do
     --list)
       [ $# -ge 2 ] || { printf '[passthru list] --list requires a value\n' >&2; exit 2; }
       case "$2" in
-        allow|deny|all) ARG_LIST="$2" ;;
+        allow|deny|ask|all) ARG_LIST="$2" ;;
         *) printf '[passthru list] invalid --list: %s\n' "$2" >&2; exit 2 ;;
       esac
       shift 2
@@ -154,10 +154,10 @@ read_file_or_empty() {
     if jq -e '.' "$p" >/dev/null 2>&1; then
       cat "$p"
     else
-      printf '{"version":1,"allow":[],"deny":[]}'
+      printf '{"version":2,"allow":[],"ask":[],"deny":[]}'
     fi
   else
-    printf '{"version":1,"allow":[],"deny":[]}'
+    printf '{"version":2,"allow":[],"ask":[],"deny":[]}'
   fi
 }
 
@@ -191,7 +191,8 @@ annotate_list() {
 }
 
 # Scope order: user first, project second. Within each scope:
-# authored first, then imported. Each file contributes allow then deny.
+# authored first, then imported. Each file contributes allow, ask, deny
+# in that order (permissive -> interactive -> restrictive).
 for scope in user project; do
   case "$ARG_SCOPE" in
     all) ;;
@@ -210,7 +211,7 @@ for scope in user project; do
       project.authored) path="$(passthru_project_authored_path)" ;;
       project.imported) path="$(passthru_project_imported_path)" ;;
     esac
-    for list in allow deny; do
+    for list in allow ask deny; do
       case "$ARG_LIST" in
         all) ;;
         "$list") ;;
@@ -269,9 +270,14 @@ tty_color() {
 }
 
 color_for_list() {
+  # allow  -> green  (permissive auto-yes)
+  # deny   -> red    (restrictive auto-no)
+  # ask    -> cyan   (interactive; distinct from allow/deny, readable on
+  #                   both dark and light terminals)
   case "$1" in
     allow) printf '\033[32m' ;;
     deny)  printf '\033[31m' ;;
+    ask)   printf '\033[36m' ;;
     *)     printf '' ;;
   esac
 }

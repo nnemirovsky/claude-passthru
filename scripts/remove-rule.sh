@@ -4,7 +4,7 @@
 # Usage:
 #   remove-rule.sh <scope> <list> <index>
 #   scope = user|project
-#   list  = allow|deny
+#   list  = allow|deny|ask
 #   index = 1-based position within the authored file's list array
 #
 # Behaviour:
@@ -56,7 +56,7 @@ if [ $# -ne 3 ]; then
   cat <<USAGE >&2
 usage: remove-rule.sh <scope> <list> <index>
   scope = user|project
-  list  = allow|deny
+  list  = allow|deny|ask
   index = 1-based position within the authored file's list array
 USAGE
   exit 1
@@ -72,8 +72,8 @@ case "$SCOPE" in
 esac
 
 case "$LIST" in
-  allow|deny) ;;
-  *) printf 'remove-rule.sh: invalid list: %s (want allow|deny)\n' "$LIST" >&2; exit 1 ;;
+  allow|deny|ask) ;;
+  *) printf 'remove-rule.sh: invalid list: %s (want allow|deny|ask)\n' "$LIST" >&2; exit 1 ;;
 esac
 
 if ! [[ "$INDEX_ARG" =~ ^[0-9]+$ ]] || [ "$INDEX_ARG" -lt 1 ]; then
@@ -224,6 +224,12 @@ NEW_CONTENT="$(
     | .version = $v
     | .allow = (.allow // [])
     | .deny  = (.deny // [])
+    # Preserve an existing ask[] on v2 files. Do NOT materialize a fresh
+    # ask[] on v1 files - that would silently promote the schema, which
+    # write-rule.sh deliberately avoids too. The pre-splice bounds check
+    # guarantees that when $list == "ask" the key already exists with at
+    # least one element, so the del below is always safe.
+    | (if $v >= 2 then .ask = (.ask // []) else . end)
     | .[$list] = (.[$list] | del(.[$i]))
   ' "$TARGET"
 )" || {

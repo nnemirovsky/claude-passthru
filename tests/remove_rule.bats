@@ -466,3 +466,149 @@ EOF
   run jq -r '.allow | length' "$(proj_imported_file)"
   [ "$output" = "1" ]
 }
+
+# ---------------------------------------------------------------------------
+# ask[] removal support (schema v2)
+# ---------------------------------------------------------------------------
+
+seed_user_authored_with_ask() {
+  cat > "$(user_file)" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    {"tool": "Bash", "match": {"command": "^ls"}, "reason": "list"}
+  ],
+  "ask": [
+    {"tool": "WebFetch", "match": {"url": "^https?://unsafe\\."}, "reason": "unsafe"},
+    {"tool": "Bash", "match": {"command": "^gh "}, "reason": "prompt on gh"},
+    {"tool": "Read", "match": {"file_path": "^/etc/"}, "reason": "etc reads"}
+  ],
+  "deny": [
+    {"tool": "Bash", "match": {"command": "rm -rf /"}, "reason": "safety"}
+  ]
+}
+EOF
+}
+
+@test "remove: happy path removes authored ask rule at index 2" {
+  seed_user_authored_with_ask
+  run_remove user ask 2
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"removed user/ask/2"* ]]
+  # Success stdout includes a tool-summary for the middle ask rule.
+  [[ "$output" == *"tool=Bash"* ]]
+  [[ "$output" == *"command=^gh "* ]]
+
+  # Remaining ask list has 2 rules, in the right order (unsafe then etc).
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "2" ]
+  run jq -r '.ask[0].match.url' "$(user_file)"
+  [ "$output" = "^https?://unsafe\\." ]
+  run jq -r '.ask[1].match.file_path' "$(user_file)"
+  [ "$output" = "^/etc/" ]
+  # Allow and deny lists untouched.
+  run jq -r '.allow | length' "$(user_file)"
+  [ "$output" = "1" ]
+  run jq -r '.deny | length' "$(user_file)"
+  [ "$output" = "1" ]
+  # Version stays v2.
+  run jq -r '.version' "$(user_file)"
+  [ "$output" = "2" ]
+}
+
+@test "remove: removes first authored ask rule (index 1) preserving tail" {
+  seed_user_authored_with_ask
+  run_remove user ask 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"removed user/ask/1"* ]]
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "2" ]
+  # Head removed; ^gh slides into index 0, etc into index 1.
+  run jq -r '.ask[0].match.command' "$(user_file)"
+  [ "$output" = "^gh " ]
+}
+
+@test "remove: removes last authored ask rule (index 3) and shrinks list" {
+  seed_user_authored_with_ask
+  run_remove user ask 3
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"removed user/ask/3"* ]]
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "2" ]
+  # Tail removed; last element is now the "prompt on gh" rule.
+  run jq -r '.ask[-1].match.command' "$(user_file)"
+  [ "$output" = "^gh " ]
+}
+
+@test "remove: ask index past end of authored list -> exit 1" {
+  seed_user_authored_with_ask
+  run_remove user ask 99
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"out of range"* ]]
+  # File untouched.
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "3" ]
+}
+
+@test "remove: --list ask on v1 file (no ask array) fails gracefully" {
+  # Classic v1 file, no ask[] key at all. Attempting to remove from ask[]
+  # must error out cleanly (the same 'nothing at index' path used for empty
+  # lists) rather than crashing or silently promoting the schema to v2.
+  cat > "$(user_file)" <<'EOF'
+{
+  "version": 1,
+  "allow": [{"tool": "Bash", "match": {"command": "^ls"}}],
+  "deny": []
+}
+EOF
+  ORIG="$(cat "$(user_file)")"
+  run_remove user ask 1
+  [ "$status" -eq 1 ]
+  # The imported file does not exist either, so we hit the 'nothing at index'
+  # path rather than the imported-rule-refusal path.
+  [[ "$output" == *"nothing at index"* ]]
+  # File must not be mutated.
+  AFTER="$(cat "$(user_file)")"
+  [ "$ORIG" = "$AFTER" ]
+  # Version stayed at 1 -- no silent schema promotion on a failed remove.
+  run jq -r '.version' "$(user_file)"
+  [ "$output" = "1" ]
+  run jq -e 'has("ask") | not' "$(user_file)"
+  [ "$status" -eq 0 ]
+}
+
+@test "remove: refuses to remove imported ask rule (user scope)" {
+  # Authored file has no ask rules; imported file has one. Remove must
+  # trip the imported-rule guard and exit 1 with the spec wording.
+  cat > "$(user_file)" <<'EOF'
+{"version":2,"allow":[],"ask":[],"deny":[]}
+EOF
+  cat > "$(user_imported_file)" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "ask": [
+    {"tool": "WebFetch", "match": {"url": "^https?://"}, "reason": "imported ask"}
+  ],
+  "deny": []
+}
+EOF
+  run_remove user ask 1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot remove imported rule at user/ask/1"* ]]
+  [[ "$output" == *"scripts/bootstrap.sh --write"* ]]
+  # Imported file untouched.
+  run jq -r '.ask | length' "$(user_imported_file)"
+  [ "$output" = "1" ]
+}
+
+@test "remove: invalid list value 'block' still rejected (ask is added to the allowed set)" {
+  # Sanity: the allowed-list set is now {allow, deny, ask}. Anything else
+  # still errors out. Specifically verify ask is accepted and the error
+  # message advertises the full triad.
+  seed_user_authored_with_ask
+  run_remove user block 1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid list"* ]]
+  [[ "$output" == *"allow|deny|ask"* ]]
+}

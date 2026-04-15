@@ -1,6 +1,6 @@
 ---
 description: List passthru rules with scope, source, list, and index annotations
-argument-hint: "[--scope user|project|all] [--list allow|deny|all] [--source authored|imported|all] [--tool <regex>] [--format table|json|raw] [--flat]"
+argument-hint: "[--scope user|project|all] [--list allow|deny|ask|all] [--source authored|imported|all] [--tool <regex>] [--format table|json|raw] [--flat]"
 ---
 
 # /passthru:list
@@ -34,7 +34,10 @@ bash ${CLAUDE_PLUGIN_ROOT}/scripts/list.sh $ARGUMENTS
 Capture stdout, stderr, and the exit code. The script accepts:
 
 * `--scope user|project|all` - default `all`.
-* `--list allow|deny|all` - default `all`.
+* `--list allow|deny|ask|all` - default `all`. The `ask` value filters
+  to rules that route matching calls through the permission prompt
+  (the overlay when enabled, otherwise the native Claude Code dialog).
+  The default `all` includes ask rules alongside allow and deny.
 * `--source authored|imported|all` - default `all`. Useful to see only
   bootstrap imports, or to check the hand-curated authored set.
 * `--tool <regex>` - perl regex matched against the `.tool` field.
@@ -43,7 +46,8 @@ Capture stdout, stderr, and the exit code. The script accepts:
   source, list, index, path, rule), `raw` emits one rule JSON per line
   with annotations stripped.
 * `--flat` - skip grouped rendering and emit one flat table with
-  `scope`, `list`, `source`, `#` columns in front.
+  `scope`, `list`, `source`, `#` columns in front. The `list` column
+  renders `ask` for ask rules.
 
 ### 2. Present the result
 
@@ -84,6 +88,13 @@ Surface stderr verbatim and suggest re-running with `--help`.
 
   ```
   /passthru:list --scope user --list deny
+  ```
+
+* Show only ask rules (rules that always route through the permission
+  prompt):
+
+  ```
+  /passthru:list --list ask
   ```
 
 * Show only what was imported by bootstrap:

@@ -391,13 +391,13 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `tests/list_script.bats` (ask-group rendering)
 - Modify: `tests/remove_rule.bats` (ask removal)
 
-- [ ] update suggest.md prompt: after regex confirmation, ask "allow / ask / deny?". On "ask", construct the rule with `decision: "ask"` and route write-rule.sh to the ask list
-- [ ] update list.sh: render ASK group alongside ALLOW/DENY. `--list ask` filters. Default `all` includes ask
-- [ ] update list.md argument-hint + examples to include ask
-- [ ] update remove-rule.sh: accept `ask` as scope-list argument. Reuse existing STATE machine + index semantics
-- [ ] update remove.md examples
-- [ ] add bats: list renders ask group; --list ask filters correctly; remove-rule removes from ask[]; removing an imported ask rule refuses (same message as existing)
-- [ ] run full suite
+- [x] update suggest.md prompt: after regex confirmation, ask "allow / ask / deny?". On "ask", construct the rule with `decision: "ask"` and route write-rule.sh to the ask list
+- [x] update list.sh: render ASK group alongside ALLOW/DENY. `--list ask` filters. Default `all` includes ask
+- [x] update list.md argument-hint + examples to include ask
+- [x] update remove-rule.sh: accept `ask` as scope-list argument. Reuse existing STATE machine + index semantics
+- [x] update remove.md examples
+- [x] add bats: list renders ask group; --list ask filters correctly; remove-rule removes from ask[]; removing an imported ask rule refuses (same message as existing)
+- [x] run full suite
 
 ### Task 6: Hook integration of ask decision path
 
