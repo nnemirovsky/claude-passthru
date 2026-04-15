@@ -115,8 +115,13 @@ run_write() {
   run_write user allow '{"tool":"Bash","match":{"command":"^ls"}}'
   [ "$status" -eq 0 ]
   [ -f "$(user_file)" ]
-  # Resulting file should have version 1 + allow + deny arrays.
-  run jq -e '.version == 1 and (.allow | type == "array") and (.deny | type == "array")' "$(user_file)"
+  # Fresh-file skeleton must be v2 and include all three arrays so the
+  # file self-documents ask support. allow now holds the new rule, ask
+  # and deny are still empty.
+  run jq -e '.version == 2
+             and (.allow | type == "array")
+             and (.ask   | type == "array")
+             and (.deny  | type == "array")' "$(user_file)"
   [ "$status" -eq 0 ]
 }
 
@@ -154,9 +159,13 @@ EOF
   [ ! -f "$(user_file)" ]
   run bash -c "bash '$WRITE' user allow '{\"tool\":\"Bash\",\"match\":{\"command\":\"[\"}}' 2>&1"
   [ "$status" -ne 0 ]
-  # File must exist and be the valid skeleton.
+  # File must exist and be the valid v2 skeleton (all three arrays empty
+  # after rollback).
   [ -f "$(user_file)" ]
-  run jq -e '.version == 1 and (.allow | length == 0) and (.deny | length == 0)' "$(user_file)"
+  run jq -e '.version == 2
+             and (.allow | length == 0)
+             and (.ask   | length == 0)
+             and (.deny  | length == 0)' "$(user_file)"
   [ "$status" -eq 0 ]
 }
 
@@ -207,9 +216,10 @@ EOF
   [ "$rc1" -eq 0 ]
   [ "$rc2" -eq 0 ]
 
-  # Final state must be valid JSON.
+  # Final state must be valid JSON. Fresh-file skeleton is v2 so the
+  # final document sits at version 2 with all three arrays present.
   [ -f "$(user_file)" ]
-  run jq -e '.version == 1 and (.allow | type == "array")' "$(user_file)"
+  run jq -e '.version == 2 and (.allow | type == "array")' "$(user_file)"
   [ "$status" -eq 0 ]
 
   # Exact count: 2.
@@ -372,9 +382,12 @@ SH
 
   # The skeleton survives; the injected rule does not. Skeleton is created
   # before the backup/mv cycle starts, so BACKUP holds the skeleton and the
-  # STATE-aware cleanup restores it.
+  # STATE-aware cleanup restores it. Fresh skeletons are v2.
   [ -f "$(user_file)" ]
-  run jq -e '.version == 1 and (.allow | length == 0) and (.deny | length == 0)' "$(user_file)"
+  run jq -e '.version == 2
+             and (.allow | length == 0)
+             and (.ask   | length == 0)
+             and (.deny  | length == 0)' "$(user_file)"
   [ "$status" -eq 0 ]
 }
 
@@ -446,4 +459,181 @@ EOF
     passthru.json.tmp.*) ;;
     *) false ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# Schema v2 + ask[] support (Task 4)
+# ---------------------------------------------------------------------------
+# write-rule.sh now accepts `ask` as a third list target, creates fresh files
+# with a v2 skeleton (all three arrays), and upgrades in-place v1 -> v2 the
+# first time an `ask` write lands against a file. allow/deny writes against a
+# v1 file deliberately keep the file at v1 so opting into v2 stays explicit.
+
+@test "write-rule: ask write appends to ask[] on a fresh file" {
+  [ ! -f "$(user_file)" ]
+  run_write user ask '{"tool":"WebFetch","match":{"url":"^https?://unsafe\\."},"reason":"prompt first"}'
+  [ "$status" -eq 0 ]
+  [ -f "$(user_file)" ]
+  # Skeleton is v2 with all three arrays; the ask rule landed in ask[].
+  run jq -e '.version == 2
+             and (.allow | length == 0)
+             and (.deny  | length == 0)
+             and (.ask   | length == 1)' "$(user_file)"
+  [ "$status" -eq 0 ]
+  run jq -r '.ask[0].tool' "$(user_file)"
+  [ "$output" = "WebFetch" ]
+  run jq -r '.ask[0].match.url' "$(user_file)"
+  [ "$output" = '^https?://unsafe\.' ]
+}
+
+@test "write-rule: ask write appends to ask[] alongside existing allow/deny" {
+  # Seed a v2 file with existing allow + deny rules.
+  cat > "$(user_file)" <<'EOF'
+{"version":2,"allow":[{"tool":"Bash","match":{"command":"^ls"}}],"ask":[],"deny":[{"tool":"Bash","match":{"command":"^rm"}}]}
+EOF
+  run_write user ask '{"tool":"WebFetch","match":{"url":"^https?://prompt\\."}}'
+  [ "$status" -eq 0 ]
+  run jq -r '.version' "$(user_file)"
+  [ "$output" = "2" ]
+  run jq -r '.allow | length' "$(user_file)"
+  [ "$output" = "1" ]
+  run jq -r '.deny | length' "$(user_file)"
+  [ "$output" = "1" ]
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "1" ]
+  run jq -r '.ask[0].tool' "$(user_file)"
+  [ "$output" = "WebFetch" ]
+}
+
+@test "write-rule: multiple ask appends accumulate in order" {
+  run_write user ask '{"tool":"WebFetch","match":{"url":"^https?://a\\."}}'
+  [ "$status" -eq 0 ]
+  run_write user ask '{"tool":"WebFetch","match":{"url":"^https?://b\\."}}'
+  [ "$status" -eq 0 ]
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "2" ]
+  run jq -r '.ask[0].match.url' "$(user_file)"
+  [ "$output" = '^https?://a\.' ]
+  run jq -r '.ask[1].match.url' "$(user_file)"
+  [ "$output" = '^https?://b\.' ]
+}
+
+@test "write-rule: first ask write upgrades v1 file to v2 in place" {
+  # Seed an explicit v1 file with existing allow/deny rules. The ask[] key
+  # is absent, as it would be for any real v1 file in the wild.
+  cat > "$(user_file)" <<'EOF'
+{"version":1,"allow":[{"tool":"Bash","match":{"command":"^ls"}}],"deny":[{"tool":"Bash","match":{"command":"^rm"}}]}
+EOF
+  run_write user ask '{"tool":"WebFetch","match":{"url":"^https?://unsafe\\."}}'
+  [ "$status" -eq 0 ]
+  # File is upgraded to v2. Existing allow/deny rules are preserved
+  # unchanged; ask[] now exists with exactly the new rule.
+  run jq -e '.version == 2
+             and (.allow | length == 1)
+             and (.allow[0].match.command == "^ls")
+             and (.deny  | length == 1)
+             and (.deny[0].match.command == "^rm")
+             and (.ask   | length == 1)
+             and (.ask[0].tool == "WebFetch")' "$(user_file)"
+  [ "$status" -eq 0 ]
+}
+
+@test "write-rule: v1 -> v2 upgrade preserves arbitrary extra top-level keys" {
+  # A v1 file that carries an extra field (for example a future annotation
+  # we do not want to silently drop). The upgrade must preserve everything
+  # other than the bumped version and the added ask[] key.
+  cat > "$(user_file)" <<'EOF'
+{"version":1,"allow":[],"deny":[],"_note":"keep me"}
+EOF
+  run_write user ask '{"tool":"WebFetch","match":{"url":"^https?://x\\."}}'
+  [ "$status" -eq 0 ]
+  run jq -r '._note' "$(user_file)"
+  [ "$output" = "keep me" ]
+  run jq -r '.version' "$(user_file)"
+  [ "$output" = "2" ]
+  run jq -r '.ask | length' "$(user_file)"
+  [ "$output" = "1" ]
+}
+
+@test "write-rule: allow write against a v1 file does NOT upgrade to v2" {
+  # Seed an explicit v1 file. An allow write must leave the version at 1
+  # and must NOT synthesize an ask[] key. Users who never opt into ask
+  # keep their v1 files byte-stable.
+  cat > "$(user_file)" <<'EOF'
+{"version":1,"allow":[],"deny":[]}
+EOF
+  run_write user allow '{"tool":"Bash","match":{"command":"^pwd"}}'
+  [ "$status" -eq 0 ]
+  run jq -r '.version' "$(user_file)"
+  [ "$output" = "1" ]
+  # ask[] key must be absent on the still-v1 file.
+  run jq -e 'has("ask") | not' "$(user_file)"
+  [ "$status" -eq 0 ]
+  run jq -r '.allow | length' "$(user_file)"
+  [ "$output" = "1" ]
+}
+
+@test "write-rule: deny write against a v1 file does NOT upgrade to v2" {
+  cat > "$(user_file)" <<'EOF'
+{"version":1,"allow":[],"deny":[]}
+EOF
+  run_write user deny '{"tool":"Bash","match":{"command":"^rm\\s+-rf"}}'
+  [ "$status" -eq 0 ]
+  run jq -r '.version' "$(user_file)"
+  [ "$output" = "1" ]
+  run jq -e 'has("ask") | not' "$(user_file)"
+  [ "$status" -eq 0 ]
+  run jq -r '.deny | length' "$(user_file)"
+  [ "$output" = "1" ]
+}
+
+@test "write-rule: invalid list value block still rejected alongside ask support" {
+  # Regression: extending the list vocabulary to {allow,deny,ask} must not
+  # accidentally accept arbitrary strings.
+  run_write user block '{"tool":"Bash"}'
+  [ "$status" -eq 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# Cross-list conflict prevention on ask writes (verifier rejection surfaces
+# from the write-rule.sh wrapper; backup is restored).
+# ---------------------------------------------------------------------------
+
+@test "write-rule: conflict ask-after-allow is rejected and rolled back" {
+  # Seed an allow rule, then try to write the identical rule into ask[].
+  # The verifier must report a three-way conflict and the wrapper must roll
+  # back to the original file byte-for-byte.
+  cat > "$(user_file)" <<'EOF'
+{"version":2,"allow":[{"tool":"Bash","match":{"command":"^ls"}}],"ask":[],"deny":[]}
+EOF
+  ORIG="$(cat "$(user_file)")"
+  run bash -c "bash '$WRITE' user ask '{\"tool\":\"Bash\",\"match\":{\"command\":\"^ls\"}}' 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"conflict"* ]]
+  AFTER="$(cat "$(user_file)")"
+  [ "$ORIG" = "$AFTER" ]
+}
+
+@test "write-rule: conflict ask-after-deny is rejected and rolled back" {
+  cat > "$(user_file)" <<'EOF'
+{"version":2,"allow":[],"ask":[],"deny":[{"tool":"Bash","match":{"command":"^rm"}}]}
+EOF
+  ORIG="$(cat "$(user_file)")"
+  run bash -c "bash '$WRITE' user ask '{\"tool\":\"Bash\",\"match\":{\"command\":\"^rm\"}}' 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"conflict"* ]]
+  AFTER="$(cat "$(user_file)")"
+  [ "$ORIG" = "$AFTER" ]
+}
+
+@test "write-rule: conflict allow-after-ask is rejected and rolled back" {
+  cat > "$(user_file)" <<'EOF'
+{"version":2,"allow":[],"ask":[{"tool":"Bash","match":{"command":"^ls"}}],"deny":[]}
+EOF
+  ORIG="$(cat "$(user_file)")"
+  run bash -c "bash '$WRITE' user allow '{\"tool\":\"Bash\",\"match\":{\"command\":\"^ls\"}}' 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"conflict"* ]]
+  AFTER="$(cat "$(user_file)")"
+  [ "$ORIG" = "$AFTER" ]
 }

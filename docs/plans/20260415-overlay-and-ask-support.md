@@ -371,14 +371,14 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `tests/write_rule.bats` (ask-list tests)
 - Modify: `tests/command_frontmatter.bats` (frontmatter still valid after edits)
 
-- [ ] extend `write-rule.sh` argv parsing: `<scope> <allow|deny|ask> <rule_json>`. Append to the corresponding array. Reuse STATE machine + lock as-is
-- [ ] emit a skeleton file with `version: 2` AND all three arrays when creating a fresh passthru.json (keeps the file self-documenting about ask support)
-- [ ] existing v1 files: when the first `ask` write happens, upgrade the version in-place to 2 and add `ask: []` key. Atomic via the existing STATE machine
-- [ ] update `commands/add.md`: support `--ask` anywhere in $ARGUMENTS. Default still allow. Error if both `--deny` and `--ask` are given
-- [ ] add worked example to add.md: `/passthru:add --ask user WebFetch "^https?://unsafe\\." "prompt on this domain"`
-- [ ] add bats: write-rule into ask[] appends correctly; writing ask into v1 file upgrades it to v2; write-rule rejects rule that already exists in another list (conflict prevention on write)
-- [ ] add bats: command_frontmatter still lints add.md after edits
-- [ ] run full suite
+- [x] extend `write-rule.sh` argv parsing: `<scope> <allow|deny|ask> <rule_json>`. Append to the corresponding array. Reuse STATE machine + lock as-is
+- [x] emit a skeleton file with `version: 2` AND all three arrays when creating a fresh passthru.json (keeps the file self-documenting about ask support)
+- [x] existing v1 files: when the first `ask` write happens, upgrade the version in-place to 2 and add `ask: []` key. Atomic via the existing STATE machine
+- [x] update `commands/add.md`: support `--ask` anywhere in $ARGUMENTS. Default still allow. Error if both `--deny` and `--ask` are given
+- [x] add worked example to add.md: `/passthru:add --ask user WebFetch "^https?://unsafe\\." "prompt on this domain"`
+- [x] add bats: write-rule into ask[] appends correctly; writing ask into v1 file upgrades it to v2; write-rule rejects rule that already exists in another list (conflict prevention on write)
+- [x] add bats: command_frontmatter still lints add.md after edits
+- [x] run full suite
 
 ### Task 5: /passthru:suggest + /passthru:list + /passthru:remove support ask
 

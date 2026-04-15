@@ -89,6 +89,14 @@ frontmatter_value() {
   [ -n "$output" ]
 }
 
+@test "commands/add.md frontmatter argument-hint mentions --ask flag" {
+  # Task 4: --ask is documented alongside --deny in the argument-hint so
+  # auto-completion and help surface the third list target.
+  run frontmatter_value "$COMMANDS_DIR/add.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ask"* ]]
+}
+
 @test "commands/add.md body mentions write-rule.sh" {
   run grep -q "write-rule.sh" "$COMMANDS_DIR/add.md"
   [ "$status" -eq 0 ]
@@ -101,6 +109,18 @@ frontmatter_value() {
 
 @test "commands/add.md body mentions --deny flag" {
   run grep -q -- '--deny' "$COMMANDS_DIR/add.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/add.md body mentions --ask flag" {
+  # Task 4: the body explains --ask as routing to the ask[] list.
+  run grep -q -- '--ask' "$COMMANDS_DIR/add.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/add.md body includes the worked --ask example" {
+  # Task 4: a runnable example that documents the canonical --ask form.
+  run grep -q 'passthru:add --ask' "$COMMANDS_DIR/add.md"
   [ "$status" -eq 0 ]
 }
 
