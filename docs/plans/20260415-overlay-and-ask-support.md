@@ -304,21 +304,21 @@ No marker file needed. Hint auto-silences when all settings entries are imported
 - Modify: `docs/rule-format.md` (document `_source_hash` field on imported rules)
 - Modify: `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` (0.4.0 -> 0.4.1)
 
-- [ ] extract `is_importable_entry <raw>` predicate from `bootstrap.sh` into `common.sh`. Both converter and hint helper use it. Single source of truth for "can bootstrap convert this entry"
-- [ ] add `normalize_settings_entry <entry>` helper in `common.sh`: trim leading/trailing whitespace only. No lowercasing, no path collapsing. Match CC's native parser exactly
-- [ ] add `hash_settings_entry <entry>` that emits sha256 of normalized form
-- [ ] add `settings_importable_hashes` that scans all settings files, uses `is_importable_entry` to filter, emits hash set one per line
-- [ ] add `imported_hashes` that reads all passthru.imported.json files and emits every present `_source_hash` value (missing fields contribute no hash)
-- [ ] modify `scripts/bootstrap.sh` to embed `_source_hash` in each rule it writes during `--write`
-- [ ] modify `session-start.sh`: replace the marker-file gate with a diff (`settings_importable_hashes - imported_hashes`). Fire the hint with the un-imported count. Remove marker touch entirely. Legacy migration: rules without `_source_hash` contribute nothing to imported_hashes, so the hint fires until the user re-runs `/passthru:bootstrap` which rewrites the file with hashes
-- [ ] remove the marker-touch logic from `session-start.sh` (dead code after this change)
-- [ ] add bats: bootstrap run produces rules with `_source_hash`; re-running bootstrap is idempotent (hashes stable); settings with no matching imported entries -> hint fires with correct count; settings fully covered -> no hint; legacy imported file (rules without `_source_hash`) + settings with entries -> hint fires (honest migration); post-bootstrap run -> hint silences
-- [ ] run `bats tests/*.bats` - must pass
-- [ ] bump version to 0.4.1 in both manifests
-- [ ] update CHANGELOG or release notes text in README if it has one; otherwise rely on gh release --generate-notes
-- [ ] commit + open PR: `fix(hint): re-fire bootstrap hint until all settings entries imported`
-- [ ] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru` in a session with importable settings entries. Verify hint fires with correct count, re-running bootstrap silences it. User confirms or flags issues
-- [ ] after user-confirmed local verification + CI green: merge PR, tag v0.4.1, release
+- [x] extract `is_importable_entry <raw>` predicate from `bootstrap.sh` into `common.sh`. Both converter and hint helper use it. Single source of truth for "can bootstrap convert this entry"
+- [x] add `normalize_settings_entry <entry>` helper in `common.sh`: trim leading/trailing whitespace only. No lowercasing, no path collapsing. Match CC's native parser exactly
+- [x] add `hash_settings_entry <entry>` that emits sha256 of normalized form
+- [x] add `settings_importable_hashes` that scans all settings files, uses `is_importable_entry` to filter, emits hash set one per line
+- [x] add `imported_hashes` that reads all passthru.imported.json files and emits every present `_source_hash` value (missing fields contribute no hash)
+- [x] modify `scripts/bootstrap.sh` to embed `_source_hash` in each rule it writes during `--write`
+- [x] modify `session-start.sh`: replace the marker-file gate with a diff (`settings_importable_hashes - imported_hashes`). Fire the hint with the un-imported count. Remove marker touch entirely. Legacy migration: rules without `_source_hash` contribute nothing to imported_hashes, so the hint fires until the user re-runs `/passthru:bootstrap` which rewrites the file with hashes
+- [x] remove the marker-touch logic from `session-start.sh` (dead code after this change)
+- [x] add bats: bootstrap run produces rules with `_source_hash`; re-running bootstrap is idempotent (hashes stable); settings with no matching imported entries -> hint fires with correct count; settings fully covered -> no hint; legacy imported file (rules without `_source_hash`) + settings with entries -> hint fires (honest migration); post-bootstrap run -> hint silences
+- [x] run `bats tests/*.bats` - must pass
+- [x] bump version to 0.4.1 in both manifests
+- [x] update CHANGELOG or release notes text in README if it has one; otherwise rely on gh release --generate-notes
+- [x] commit + open PR: `fix(hint): re-fire bootstrap hint until all settings entries imported`
+- [x] auto-merged, user to test post-release (policy: auto-merge after CI green)
+- [x] after user-confirmed local verification + CI green: merge PR, tag v0.4.1, release
 
 ### Task 2: PostToolUseFailure handler (ship as v0.4.2 patch)
 

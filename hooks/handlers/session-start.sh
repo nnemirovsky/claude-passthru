@@ -2,35 +2,36 @@
 # claude-passthru SessionStart hook handler.
 #
 # Purpose:
-#   One-time, best-effort hint nudging brand-new passthru users to run
-#   `/passthru:bootstrap` if they already have native permission rules in
-#   their `~/.claude/settings.json` that could be imported. Emits a JSON
-#   envelope `{"systemMessage": "<text>"}` on stdout, which Claude Code
-#   surfaces in the session view as "SessionStart:startup says: <text>".
-#   Then touches a marker so the hint does not fire again.
+#   Nudges passthru users to run `/passthru:bootstrap` whenever their native
+#   `permissions.allow` entries (in settings.json / settings.local.json) are
+#   not yet fully reflected in `passthru.imported.json`. The hint re-fires
+#   every session until migration is complete and then auto-silences.
+#   Emits `{"systemMessage":"<text>"}` on stdout (Claude Code surfaces this
+#   as `SessionStart:startup says: <text>` in the session view).
 #
 # Contract:
 #   stdin  - JSON envelope from Claude Code (SessionStart hook). We do
 #            not need any of its fields, and `exec < /dev/null` up front
 #            ensures nothing downstream ever blocks on reading it.
 #   stdout - a single-line JSON object `{"systemMessage":"<text>"}` when
-#            the hint should fire, otherwise EMPTY. Per Claude Code
-#            docs, SessionStart `systemMessage` is surfaced in the
-#            session view as "SessionStart:startup says: <text>". Plain
-#            text stdout does NOT surface - the JSON envelope is the
-#            correct contract.
+#            the hint should fire, otherwise EMPTY. Plain text stdout
+#            does NOT surface - the JSON envelope is the correct contract.
 #   exit   - always 0. Any error fails open (empty stdout, exit 0).
 #
-# Gating:
-#   - If the marker file `${PASSTHRU_USER_HOME}/.claude/passthru.bootstrap-hint-shown`
-#     already exists, exit silently.
-#   - If the user already has a `passthru.json` or `passthru.imported.json`
-#     in either scope, they are already using the plugin - touch the
-#     marker and exit silently.
-#   - If `~/.claude/settings.json` has no `.permissions.allow` entries,
-#     there is nothing to import - touch the marker and exit silently.
-#   - Otherwise: count the allow entries, emit the hint as a JSON
-#     `systemMessage` envelope on stdout, touch the marker.
+# Gating (hash-diff):
+#   1. Compute `settings_importable_hashes` - a set over every importable
+#      entry across user + project settings files (filtered by
+#      `is_importable_entry`, the same predicate bootstrap.sh uses).
+#   2. Compute `imported_hashes` - every `_source_hash` present in either
+#      passthru.imported.json file. Rules without `_source_hash` contribute
+#      nothing; legacy imported files pre-dating this change therefore
+#      force the hint to re-fire until bootstrap is re-run, which rewrites
+#      the files with hashes.
+#   3. If `settings - imported` is non-empty, emit the hint with the
+#      missing count. Otherwise stay silent.
+#
+# The old marker file (`~/.claude/passthru.bootstrap-hint-shown`) is no
+# longer consulted or written. The hash diff is authoritative.
 #
 # Paths honor PASSTHRU_USER_HOME and PASSTHRU_PROJECT_DIR so bats tests
 # never touch the real ~/.claude.
@@ -68,76 +69,42 @@ fi
 # ---------------------------------------------------------------------------
 trap 'printf "[passthru] unexpected error in session-start.sh\n" >&2; exit 0' ERR
 
-USER_HOME="$(passthru_user_home)"
-MARKER="${USER_HOME}/.claude/passthru.bootstrap-hint-shown"
+# ---------------------------------------------------------------------------
+# 1. Collect the importable-entry hash set and the already-imported hash set.
+#    Sort + uniq for set semantics.
+# ---------------------------------------------------------------------------
+SETTINGS_HASHES="$(settings_importable_hashes | sort -u)"
+IMPORTED_HASHES="$(imported_hashes | sort -u)"
 
 # ---------------------------------------------------------------------------
-# 1. Marker already set -> silent no-op.
+# 2. Diff: settings - imported. Anything left is un-imported.
+#    Use `comm -23` to print lines only in the first (settings) side.
 # ---------------------------------------------------------------------------
-if [ -e "$MARKER" ]; then
+MISSING_COUNT=0
+if [ -n "$SETTINGS_HASHES" ]; then
+  # comm needs seekable inputs via process substitution.
+  MISSING="$(comm -23 \
+    <(printf '%s\n' "$SETTINGS_HASHES") \
+    <(printf '%s\n' "$IMPORTED_HASHES"))"
+  if [ -n "$MISSING" ]; then
+    # Count non-empty lines.
+    MISSING_COUNT="$(printf '%s\n' "$MISSING" | grep -c '.' || true)"
+  fi
+fi
+
+if [ "$MISSING_COUNT" -eq 0 ]; then
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# Ensure the parent directory for the marker exists. If we cannot create
-# it, fail open - we will try again next session, and the hint is purely
-# optional.
+# 3. Emit the hint on stdout as a JSON `systemMessage` envelope.
+#    Singular/plural: "1 importable rule" vs "N importable rules".
 # ---------------------------------------------------------------------------
-MARKER_DIR="$(dirname "$MARKER")"
-if [ ! -d "$MARKER_DIR" ]; then
-  mkdir -p "$MARKER_DIR" 2>/dev/null || {
-    exit 0
-  }
+if [ "$MISSING_COUNT" -eq 1 ]; then
+  HINT_MSG="passthru: 1 importable permission rule in settings not yet imported. Run /passthru:bootstrap to convert it."
+else
+  HINT_MSG="passthru: ${MISSING_COUNT} importable permission rules in settings not yet imported. Run /passthru:bootstrap to convert them."
 fi
-
-# touch_marker: best-effort touch. Never aborts the script on failure.
-touch_marker() {
-  touch "$MARKER" 2>/dev/null || true
-}
-
-# ---------------------------------------------------------------------------
-# 2. User already uses passthru (any rule file exists) -> touch and exit.
-# ---------------------------------------------------------------------------
-USER_AUTHORED="$(passthru_user_authored_path)"
-USER_IMPORTED="$(passthru_user_imported_path)"
-PROJECT_AUTHORED="$(passthru_project_authored_path)"
-PROJECT_IMPORTED="$(passthru_project_imported_path)"
-
-if [ -f "$USER_AUTHORED" ] || [ -f "$USER_IMPORTED" ] \
-   || [ -f "$PROJECT_AUTHORED" ] || [ -f "$PROJECT_IMPORTED" ]; then
-  touch_marker
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Count importable entries in ~/.claude/settings.json.
-#    Missing file or malformed JSON -> zero entries (and we still touch
-#    the marker so we do not keep probing a broken file on every session).
-# ---------------------------------------------------------------------------
-SETTINGS="${USER_HOME}/.claude/settings.json"
-COUNT=0
-
-if [ -f "$SETTINGS" ]; then
-  # jq returns null on missing .permissions.allow; coerce to 0.
-  COUNT_OUT="$(jq -r '(.permissions.allow // []) | length' "$SETTINGS" 2>/dev/null || echo 0)"
-  # Guard against empty / non-numeric output.
-  case "$COUNT_OUT" in
-    ''|*[!0-9]*) COUNT=0 ;;
-    *) COUNT="$COUNT_OUT" ;;
-  esac
-fi
-
-if [ "$COUNT" -eq 0 ]; then
-  touch_marker
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# 4. Emit the one-time hint on stdout as a JSON `systemMessage` envelope
-#    and persist the marker. Claude Code surfaces the systemMessage in the
-#    session view as "SessionStart:startup says: <text>".
-# ---------------------------------------------------------------------------
-HINT_MSG="passthru: detected ${COUNT} importable permission rule(s) in ~/.claude/settings.json. Run /passthru:bootstrap to convert them. This tip only shows once."
 
 # jq -nc builds a compact JSON object with proper escaping. Fail-open: if
 # jq cannot produce output, we stay silent rather than emit broken JSON.
@@ -145,5 +112,4 @@ if ENVELOPE="$(jq -nc --arg msg "$HINT_MSG" '{systemMessage:$msg}' 2>/dev/null)"
   printf '%s\n' "$ENVELOPE"
 fi
 
-touch_marker
 exit 0

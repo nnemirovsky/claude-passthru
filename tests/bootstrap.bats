@@ -804,3 +804,72 @@ EOF
   run perl -e 'exit(1) unless $ARGV[0] =~ /$ARGV[1]/' '/path/with spaces/file' "$pat"
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# _source_hash embedded on every imported rule (enables session-start diff)
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: every imported rule has _source_hash matching hash_settings_entry" {
+  printf '%s\n' \
+    '{"permissions":{"allow":["Bash(ls:*)","WebSearch","mcp__x__y","WebFetch(domain:x.com)","Read(/tmp/**)","Skill(revdiff)","Bash(echo hi)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+
+  # Every allow rule must carry a 64-char hex _source_hash.
+  bad="$(jq -r '[.allow[] | select((._source_hash == null) or ((._source_hash | test("^[0-9a-f]{64}$")) | not))] | length' "$(user_imported)")"
+  [ "$bad" = "0" ]
+
+  # The hash of each entry must match hash_settings_entry.
+  for entry in 'Bash(ls:*)' 'WebSearch' 'mcp__x__y' 'WebFetch(domain:x.com)' 'Read(/tmp/**)' 'Skill(revdiff)' 'Bash(echo hi)'; do
+    expected="$(hash_settings_entry "$entry")"
+    found="$(jq -r --arg h "$expected" '[.allow[] | select(._source_hash == $h)] | length' "$(user_imported)")"
+    [ "$found" = "1" ] || {
+      echo "hash for '$entry' ($expected) not found in imported allow[]" >&2
+      return 1
+    }
+  done
+}
+
+@test "bootstrap: re-running --write is idempotent at the hash level" {
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)"]}}' \
+    > "$USER_ROOT/.claude/settings.json"
+
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  first="$(jq -S '[.allow[]._source_hash] | sort' "$(user_imported)")"
+
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  second="$(jq -S '[.allow[]._source_hash] | sort' "$(user_imported)")"
+
+  [ "$first" = "$second" ]
+}
+
+@test "bootstrap: hash is case-sensitive (Bash and bash produce distinct hashes)" {
+  # A Bash entry and an unrecognised-but-importable test: only the valid one
+  # produces output, but this test targets hash stability itself via the
+  # helper, not the converter.
+  a="$(hash_settings_entry 'Bash(ls:*)')"
+  b="$(hash_settings_entry 'bash(ls:*)')"
+  [ "$a" != "$b" ]
+}
+
+@test "bootstrap: rule identity dedup still works with _source_hash present" {
+  # The identity canon uses {tool, match} only; two identical entries across
+  # user scope (shared + local) must collapse to one imported rule even
+  # though each pass attaches a hash.
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$PROJ_ROOT/.claude/settings.json"
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)"]}}' \
+    > "$PROJ_ROOT/.claude/settings.local.json"
+
+  run_boot --project-only --write
+  [ "$status" -eq 0 ]
+  count="$(jq -r '.allow | length' "$(proj_imported)")"
+  [ "$count" = "1" ]
+  # And the single rule does carry a _source_hash.
+  hash_val="$(jq -r '.allow[0]._source_hash' "$(proj_imported)")"
+  expected="$(hash_settings_entry 'Bash(ls:*)')"
+  [ "$hash_val" = "$expected" ]
+}

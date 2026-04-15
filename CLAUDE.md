@@ -31,9 +31,10 @@ hooks/
   handlers/
     pre-tool-use.sh    main hook: loads rules, matches, emits allow/deny/passthrough
     post-tool-use.sh   classifies native-dialog outcomes into asked_* events (audit only)
-    session-start.sh   one-time bootstrap hint. Gated by ~/.claude/passthru.bootstrap-hint-shown
-                       marker. Prints to stderr only when the user has no passthru files yet
-                       AND has importable entries in ~/.claude/settings.json.
+    session-start.sh   bootstrap hint. Re-fires every session while importable entries in
+                       settings.json / settings.local.json are not yet covered by
+                       _source_hash values in passthru.imported.json. Hash diff replaces
+                       the old one-shot marker. Auto-silences when migration is complete.
 scripts/
   bootstrap.sh         one-time importer from native permissions.allow into passthru.imported.json.
                        Supported shapes: Bash(prefix:*) | Bash(exact) | mcp__* | WebFetch(domain:X)

@@ -79,6 +79,12 @@ Absent `match` (or an empty object) matches any input, so the rule reduces to a 
 
 Human-readable note describing why the rule exists. The hook surfaces it in the `permissionDecisionReason` field Claude Code shows. Purely documentation for you. The verifier does not check it.
 
+### `_source_hash` (string, optional)
+
+SHA-256 hex digest of the original `permissions.allow` entry that a given rule was imported from. Present only on rules written by `scripts/bootstrap.sh`. You never need to set this by hand, and you should not edit it. The session-start bootstrap hint uses this field to compute the diff between entries in `settings.json` and rules already in `passthru.imported.json`: a rule carries `_source_hash` iff bootstrap has imported the corresponding native entry.
+
+Legacy `passthru.imported.json` files from before this field existed have no hashes. In that case the hint re-fires every session until you re-run `/passthru:bootstrap`, which rewrites the file with hashes attached. After that the hint auto-silences as intended.
+
 ## Example rules
 
 **Allow `gh api /repos/*/*/forks` across any owner/repo:**
