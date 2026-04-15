@@ -510,3 +510,228 @@ EOF
   # Tool segment present too (because the rule has .tool).
   [[ "$pat" == *"WebFetch"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Task 6: ask decision path (document-order allow+ask walk)
+# ---------------------------------------------------------------------------
+
+@test "handler: ask rule match emits ask decision JSON" {
+  # A v2 file with an ask[] rule must produce permissionDecision "ask" with
+  # reason prefix "passthru ask:" and the rule's reason appended.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "confirm gh" }
+  ],
+  "deny": []
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh api /repos/a/b"}}'
+  [ "$status" -eq 0 ]
+  out="$output"
+  event="$(jq -r '.hookSpecificOutput.hookEventName' <<<"$out")"
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$out")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$out")"
+  [ "$event" = "PreToolUse" ]
+  [ "$decision" = "ask" ]
+  [ "$reason" = "passthru ask: confirm gh" ]
+}
+
+@test "handler: ask rule without .reason synthesizes a pattern-based reason" {
+  # Absent reason field -> message still surfaces the matched rule pattern so
+  # the user sees WHY we are asking.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^curl " } }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"curl https://example.com"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [ "$decision" = "ask" ]
+  # Synthesized form: "passthru ask: matched rule [<pattern-summary>]".
+  [[ "$reason" == passthru\ ask:\ matched\ rule* ]]
+  # Pattern surface includes the matched tool name and command regex.
+  [[ "$reason" == *"Bash"* ]]
+  [[ "$reason" == *"command="* ]]
+}
+
+@test "audit: ask decision writes event=ask with rule_index + pattern" {
+  enable_audit
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "confirm gh" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh pr list"},"tool_use_id":"tASK"}'
+  [ "$status" -eq 0 ]
+  [ -f "$(audit_log)" ]
+  line="$(head -n1 "$(audit_log)")"
+  run jq -r '.event' <<<"$line"
+  [ "$output" = "ask" ]
+  run jq -r '.source' <<<"$line"
+  [ "$output" = "passthru" ]
+  run jq -r '.reason' <<<"$line"
+  [ "$output" = "confirm gh" ]
+  # Merged ask-array index 0 for the sole ask rule.
+  run jq -r '.rule_index' <<<"$line"
+  [ "$output" = "0" ]
+  run jq -r '.pattern' <<<"$line"
+  [[ "$output" == *"Bash"* ]]
+  [[ "$output" == *"command="* ]]
+  run jq -r '.tool_use_id' <<<"$line"
+  [ "$output" = "tASK" ]
+}
+
+@test "handler: deny still wins over ask when both would match" {
+  # Deny must be checked first; an ask rule covering the same call is moot.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^rm " }, "reason": "confirm rm" }
+  ],
+  "deny": [
+    { "tool": "Bash", "match": { "command": "^rm\\s+-rf" }, "reason": "never rm -rf" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/junk"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  [ "$decision" = "deny" ]
+}
+
+@test "handler: document order - narrow allow before broad ask (same file) -> allow wins" {
+  # JSON key order (via jq keys_unsorted) decides the within-file walking
+  # order for allow[] vs ask[]. Here allow[] appears first in the file, so
+  # the narrow allow rule is checked before the broad ask rule and wins.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^gh api /repos" }, "reason": "narrow allow" }
+  ],
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "broad ask" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh api /repos/foo/bar"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [ "$decision" = "allow" ]
+  [[ "$reason" == *"narrow allow"* ]]
+}
+
+@test "handler: document order - narrow ask before broad allow (same file) -> ask wins" {
+  # Reversed key order: ask[] appears textually before allow[] in the file.
+  # The narrow ask rule is checked first and wins.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh api /repos" }, "reason": "narrow ask" }
+  ],
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "broad allow" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh api /repos/foo/bar"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [ "$decision" = "ask" ]
+  [[ "$reason" == *"narrow ask"* ]]
+}
+
+@test "handler: cross-file - user-authored ask before user-imported allow -> ask wins" {
+  # user-authored comes before user-imported in the fixed scope precedence,
+  # so an ask rule in passthru.json is checked before an allow rule in
+  # passthru.imported.json even if both would match.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "authored ask" }
+  ]
+}
+EOF
+  cat > "$USER_ROOT/.claude/passthru.imported.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "imported allow" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh pr list"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [ "$decision" = "ask" ]
+  [[ "$reason" == *"authored ask"* ]]
+}
+
+@test "handler: cross-file - project allow before user ask honored per scope precedence" {
+  # load_rules scope order is:
+  #   user-authored -> user-imported -> project-authored -> project-imported.
+  # User-scope ask rules come BEFORE project-scope allow rules even if the
+  # project file was physically populated later. A user ask must win over a
+  # project allow for the same call, regardless of anyone's intuition about
+  # "later overrides earlier".
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "user ask" }
+  ]
+}
+EOF
+  cat > "$PROJ_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "project allow" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh pr list"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [ "$decision" = "ask" ]
+  [[ "$reason" == *"user ask"* ]]
+}
+
+@test "handler: v1 file with stray ask[] key never triggers ask decision" {
+  # build_ordered_allow_ask must strip ask[] for v1 files to match load_rules.
+  # Even if a user includes ask[] in a v1 file (accidental or from a future
+  # schema draft), the hook must ignore it and fall through to passthrough.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 1,
+  "allow": [],
+  "deny": [],
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^gh " }, "reason": "should be ignored" }
+  ]
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"gh pr list"}}'
+  [ "$status" -eq 0 ]
+  # No ask, no allow, no deny -> passthrough.
+  cont="$(jq -r '.continue' <<<"$output")"
+  [ "$cont" = "true" ]
+}

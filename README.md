@@ -319,6 +319,7 @@ or
 
 * `allow` - a passthru allow rule matched.
 * `deny` - a passthru deny rule matched.
+* `ask` - a passthru ask rule matched. The hook emits `permissionDecision: "ask"` to surface the native permission dialog (the overlay path planned for a later release will replace this with an inline TUI popup).
 * `passthrough` - no passthru rule matched. Control passed to the native permission system.
 
 From the `PostToolUse` hook, classifying what the native dialog decided for a passthrough:

@@ -8,6 +8,10 @@
 #              * allow: { "hookSpecificOutput": { "hookEventName": "PreToolUse",
 #                         "permissionDecision": "allow", "permissionDecisionReason": "..." } }
 #              * deny:  same shape with "deny"
+#              * ask:   same shape with "ask" (Claude Code surfaces the native
+#                       permission dialog; plan Task 8 later replaces this with
+#                       an overlay popup when available, falling back to this
+#                       emit path when overlay is unavailable/disabled)
 #              * passthrough: { "continue": true }
 #   exit   - always 0. Hook failures fail open (passthrough) so plugin bugs never
 #            block tool execution.
@@ -168,7 +172,7 @@ audit_gc_breadcrumbs() {
 # emit_passthrough lives in common.sh.
 
 emit_decision() {
-  # $1 = "allow" | "deny"
+  # $1 = "allow" | "deny" | "ask"
   # $2 = reason string
   local decision="$1" reason="$2"
   jq -cn \
@@ -313,9 +317,7 @@ fi
 
 # --- 5. Match deny first ---------------------------------------------------
 DENY_RULES="$(jq -c '.deny // []' <<<"$MERGED" 2>/dev/null)"
-ALLOW_RULES="$(jq -c '.allow // []' <<<"$MERGED" 2>/dev/null)"
 [ -z "$DENY_RULES" ] && DENY_RULES='[]'
-[ -z "$ALLOW_RULES" ] && ALLOW_RULES='[]'
 
 DENY_HIT=""
 if DENY_HIT="$(find_first_match "$DENY_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
@@ -361,29 +363,63 @@ if [ -n "$DENY_HIT" ]; then
   exit 0
 fi
 
-# --- 6. Match allow --------------------------------------------------------
-ALLOW_HIT=""
-if ALLOW_HIT="$(find_first_match "$ALLOW_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
-  :
-else
-  printf '[passthru] allow rule regex error; passing through\n' >&2
-  emit_passthrough
-  exit 0
-fi
+# --- 6. Match allow + ask in document order --------------------------------
+# build_ordered_allow_ask returns a JSON array of {list, merged_idx, rule}
+# entries that walk each source file's allow[] and ask[] in the order they
+# appear in that file (via keys_unsorted). First match wins, with the `list`
+# field deciding whether we emit "allow" or "ask". merged_idx is the rule's
+# position in the corresponding merged array (so audit rule_index stays
+# consistent with /passthru:list output).
+ORDERED="$(build_ordered_allow_ask 2>/dev/null)"
+[ -z "$ORDERED" ] && ORDERED='[]'
 
-if [ -n "$ALLOW_HIT" ]; then
-  ALLOW_IDX="${ALLOW_HIT%%$'\t'*}"
-  ALLOW_MATCH="${ALLOW_HIT#*$'\t'}"
-  REASON="$(jq -r '.reason // ""' <<<"$ALLOW_MATCH" 2>/dev/null)"
-  PATTERN="$(rule_pattern_summary "$ALLOW_MATCH")"
-  if [ -n "$REASON" ]; then
-    MSG="passthru allow: ${REASON}"
-  else
-    MSG="passthru allow: matched rule [${PATTERN}]"
-  fi
-  emit_decision "allow" "$MSG"
-  audit_write_line "allow" "$TOOL_NAME" "$REASON" "$ALLOW_IDX" "$PATTERN" "$TOOL_USE_ID"
-  exit 0
+ORDERED_COUNT="$(jq -r 'if type == "array" then length else 0 end' <<<"$ORDERED" 2>/dev/null)"
+[ -z "$ORDERED_COUNT" ] && ORDERED_COUNT=0
+
+if [ "$ORDERED_COUNT" -gt 0 ]; then
+  i=0
+  while [ "$i" -lt "$ORDERED_COUNT" ]; do
+    ENTRY="$(jq -c --argjson i "$i" '.[$i]' <<<"$ORDERED" 2>/dev/null)"
+    LIST_TYPE="$(jq -r '.list // ""' <<<"$ENTRY" 2>/dev/null)"
+    RULE="$(jq -c '.rule // {}' <<<"$ENTRY" 2>/dev/null)"
+    RULE_IDX="$(jq -r '.merged_idx // 0' <<<"$ENTRY" 2>/dev/null)"
+
+    # Catch match_rule's return code without letting `set -e` abort the loop
+    # on the expected "no match" (rc=1) path.
+    mrc=0
+    match_rule "$TOOL_NAME" "$TOOL_INPUT" "$RULE" || mrc=$?
+    if [ "$mrc" -eq 2 ]; then
+      # Invalid regex in allow/ask rule. Fail open so a single bad rule
+      # cannot block every tool call.
+      printf '[passthru] %s rule regex error; passing through\n' "$LIST_TYPE" >&2
+      emit_passthrough
+      exit 0
+    fi
+    if [ "$mrc" -eq 0 ]; then
+      REASON="$(jq -r '.reason // ""' <<<"$RULE" 2>/dev/null)"
+      PATTERN="$(rule_pattern_summary "$RULE")"
+      if [ "$LIST_TYPE" = "ask" ]; then
+        if [ -n "$REASON" ]; then
+          MSG="passthru ask: ${REASON}"
+        else
+          MSG="passthru ask: matched rule [${PATTERN}]"
+        fi
+        emit_decision "ask" "$MSG"
+        audit_write_line "ask" "$TOOL_NAME" "$REASON" "$RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
+        exit 0
+      else
+        if [ -n "$REASON" ]; then
+          MSG="passthru allow: ${REASON}"
+        else
+          MSG="passthru allow: matched rule [${PATTERN}]"
+        fi
+        emit_decision "allow" "$MSG"
+        audit_write_line "allow" "$TOOL_NAME" "$REASON" "$RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
+        exit 0
+      fi
+    fi
+    i=$((i + 1))
+  done
 fi
 
 # --- 7. Passthrough --------------------------------------------------------

@@ -698,6 +698,80 @@ load_rules() {
 }
 
 # ---------------------------------------------------------------------------
+# build_ordered_allow_ask
+# ---------------------------------------------------------------------------
+#
+# Emit a JSON array of {list, merged_idx, rule} objects that walks allow[]
+# and ask[] rules across the four rule files in DOCUMENT ORDER:
+#   1. Scope order is fixed: user-authored -> user-imported ->
+#      project-authored -> project-imported.
+#   2. Within each file, the relative order between allow[] and ask[] is
+#      taken from JSON key order (keys_unsorted). A file with
+#      {"ask":[...], "allow":[...]} walks ask rules first; a file with
+#      {"allow":[...], "ask":[...]} walks allow rules first.
+#   3. Within each array, rules are walked in their JSON array order.
+#
+# The `merged_idx` field matches the rule's position in the merged allow[]
+# or ask[] array that load_rules would produce. Keeps audit-log rule_index
+# values consistent with `/passthru:list` output regardless of which path
+# (allow-first vs ask-first) a given file takes.
+#
+# v1 files contribute no ask rules (matches load_rules' v1 handling).
+# Missing files, empty files, and files with only a subset of keys are all
+# handled gracefully; this function is silent (never prints diagnostics).
+# On jq error (corrupt JSON already rejected by load_rules upstream) the
+# function emits an empty array.
+build_ordered_allow_ask() {
+  local raw_files=()
+  local p
+  for p in \
+    "$(passthru_user_authored_path)" \
+    "$(passthru_user_imported_path)" \
+    "$(passthru_project_authored_path)" \
+    "$(passthru_project_imported_path)"; do
+    if [ -f "$p" ] && [ -s "$p" ]; then
+      raw_files+=("$p")
+    fi
+  done
+
+  if [ "${#raw_files[@]}" -eq 0 ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # Feed the raw files as a single slurp so jq sees the ORIGINAL key order
+  # (load_rules would normalize keys alphabetically and lose it). Invalid
+  # JSON has already been flagged by load_rules; here we fall back to [].
+  jq -s -c '
+    . as $files
+    | reduce range(0; $files | length) as $fi
+        ({entries: [], allow_idx: 0, ask_idx: 0};
+          . as $acc
+          | ($files[$fi] // {}) as $doc
+          | (($doc.version // 1)) as $ver
+          | ($doc
+             | keys_unsorted
+             | map(select(. == "allow" or . == "ask"))
+             # v1 files never contribute ask rules.
+             | map(select(. == "allow" or $ver >= 2))) as $order
+          | reduce $order[] as $key ($acc;
+              . as $a2
+              | ($doc[$key] // []) as $list
+              | reduce range(0; $list | length) as $ri ($a2;
+                  if $key == "allow"
+                  then .entries += [{list: "allow", rule: $list[$ri], merged_idx: .allow_idx}]
+                       | .allow_idx += 1
+                  else .entries += [{list: "ask", rule: $list[$ri], merged_idx: .ask_idx}]
+                       | .ask_idx += 1
+                  end
+                )
+            )
+        )
+    | .entries
+  ' "${raw_files[@]}" 2>/dev/null || printf '[]\n'
+}
+
+# ---------------------------------------------------------------------------
 # validate_rules
 # ---------------------------------------------------------------------------
 #

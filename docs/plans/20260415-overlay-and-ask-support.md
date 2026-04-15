@@ -405,13 +405,13 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `hooks/handlers/pre-tool-use.sh` (check ask[] and allow[] in document order after deny)
 - Modify: `tests/hook_handler.bats` (ask-decision tests)
 
-- [ ] extend pre-tool-use.sh decision order:
+- [x] extend pre-tool-use.sh decision order:
   - deny[] first-match -> emit deny, done
   - allow+ask first-match in document order (merge the two arrays preserving their positions per file/scope): if the match is from allow, emit allow; if the match is from ask, fall through to overlay path (which in Task 6 stays simple: emit permissionDecision:"ask" since overlay comes in Task 8). After Task 8, overlay path is wired up
-- [ ] on ask match (in Task 6 form): emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"passthru ask: <reason>"}}`. This emit path is REUSED as the "overlay unavailable or disabled" fallback in Task 8 (no code rewrite needed)
-- [ ] extend audit log: on ask decision, log `event: "ask"` with rule_index + pattern. Add `ask` to `color_for_event` in log.sh (color: cyan or bright-blue - distinct from allow/deny/passthrough)
-- [ ] add bats: ask-rule matches a tool call -> permissionDecision: ask emitted; audit log line has event "ask"; deny still wins over ask; narrow allow BEFORE broad ask -> allow wins (document order); narrow ask BEFORE broad allow -> ask wins (document order); ask and allow within the same scope respect file order
-- [ ] run full suite
+- [x] on ask match (in Task 6 form): emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"passthru ask: <reason>"}}`. This emit path is REUSED as the "overlay unavailable or disabled" fallback in Task 8 (no code rewrite needed)
+- [x] extend audit log: on ask decision, log `event: "ask"` with rule_index + pattern. Add `ask` to `color_for_event` in log.sh (color: cyan or bright-blue - distinct from allow/deny/passthrough)
+- [x] add bats: ask-rule matches a tool call -> permissionDecision: ask emitted; audit log line has event "ask"; deny still wins over ask; narrow allow BEFORE broad ask -> allow wins (document order); narrow ask BEFORE broad allow -> ask wins (document order); ask and allow within the same scope respect file order
+- [x] run full suite
 
 ### Task 7: Overlay detection + launcher (skeleton, before first ship of overlay)
 

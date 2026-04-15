@@ -172,6 +172,13 @@ color_for_event() {
     passthrough|asked_allowed_unknown)
       printf '\033[33m'  # yellow
       ;;
+    ask)
+      # Interactive ask decision emitted by pre-tool-use.sh when an
+      # ask[] rule matches. Cyan matches the ASK group in
+      # /passthru:list for a consistent visual language across CLI and
+      # audit log.
+      printf '\033[36m'  # cyan
+      ;;
     errored)
       # Non-permission tool-call failures surfaced via PostToolUseFailure.
       # Dim (not red: the call was not refused, it errored out for some
