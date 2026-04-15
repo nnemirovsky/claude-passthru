@@ -583,6 +583,68 @@ frontmatter_value() {
 }
 
 # ---------------------------------------------------------------------------
+# Tests - commands/overlay.md (Task 9)
+# ---------------------------------------------------------------------------
+
+@test "commands/overlay.md exists" {
+  [ -f "$COMMANDS_DIR/overlay.md" ]
+}
+
+@test "commands/overlay.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/overlay.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/overlay.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/overlay.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/overlay.md frontmatter argument-hint mentions --enable, --disable, --status" {
+  run frontmatter_value "$COMMANDS_DIR/overlay.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--enable"* ]]
+  [[ "$output" == *"--disable"* ]]
+  [[ "$output" == *"--status"* ]]
+}
+
+@test "commands/overlay.md body mentions overlay-config.sh" {
+  run grep -q "overlay-config.sh" "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body mentions \$ARGUMENTS pass-through" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body mentions the sentinel path" {
+  run grep -q 'passthru.overlay.disabled' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body includes worked examples for each flag" {
+  run grep -q 'passthru:overlay --enable' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'passthru:overlay --disable' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'passthru:overlay --status' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # Auto-iteration: every commands/*.md must have a well-formed frontmatter
 # block with non-empty description and argument-hint. Picks up new files
 # automatically so future command additions get baseline coverage.

@@ -468,15 +468,15 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Create: `tests/overlay_config.bats`
 - Modify: `tests/command_frontmatter.bats` (cover overlay.md)
 
-- [ ] pick: dedicated `scripts/overlay-config.sh` + `/passthru:overlay` command, parallel to `/passthru:log --enable|--disable|--status`. Decision: dedicated script for UX clarity
-- [ ] `scripts/overlay-config.sh`: flags `--enable`, `--disable`, `--status`, `--help`. Toggles `~/.claude/passthru.overlay.disabled`. Also reports which multiplexers are detected in `--status`
-- [ ] `commands/overlay.md`: frontmatter:
+- [x] pick: dedicated `scripts/overlay-config.sh` + `/passthru:overlay` command, parallel to `/passthru:log --enable|--disable|--status`. Decision: dedicated script for UX clarity
+- [x] `scripts/overlay-config.sh`: flags `--enable`, `--disable`, `--status`, `--help`. Toggles `~/.claude/passthru.overlay.disabled`. Also reports which multiplexers are detected in `--status`
+- [x] `commands/overlay.md`: frontmatter:
   - `description: "Toggle the passthru permission-prompt overlay"`
   - `argument-hint: "[--enable|--disable|--status]"`
   Body shells out to overlay-config.sh. Worked examples for each flag + status output
-- [ ] bats: --enable, --disable, --status, --help exit codes and output shape. Status includes multiplexer detection
-- [ ] update command_frontmatter.bats to cover overlay.md (auto-iteration should pick it up, add explicit assertions for description + argument-hint content)
-- [ ] run full suite
+- [x] bats: --enable, --disable, --status, --help exit codes and output shape. Status includes multiplexer detection
+- [x] update command_frontmatter.bats to cover overlay.md (auto-iteration should pick it up, add explicit assertions for description + argument-hint content)
+- [x] run full suite
 
 ### Task 10: Ship overlay + ask support as v0.5.0
 
