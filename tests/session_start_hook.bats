@@ -14,10 +14,17 @@
 #   * marker absent + no passthru files + settings.json with empty allow
 #                                                          -> marker created, no hint
 #   * marker absent + no passthru files + settings.json with N allow entries
-#                                                          -> hint on stderr, marker created
+#                                                          -> hint on stdout, marker created
 #   * malformed stdin                                      -> fail open (exit 0, no crash)
 #
 # Hermetic via PASSTHRU_USER_HOME / PASSTHRU_PROJECT_DIR.
+#
+# Contract notes:
+#   Per Claude Code docs, SessionStart stdout is plain text and surfaces in the
+#   session view as "SessionStart:startup says: <text>". The handler therefore
+#   emits the hint on stdout (not stderr) when it fires, and emits nothing on
+#   stdout in all other cases - including the marker-present short-circuit -
+#   so the session header stays clean.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -70,8 +77,8 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  # stdout is just "{}\n".
-  [ "$STDOUT" = "{}" ]
+  # stdout must be empty - no `{}` noise in the session header.
+  [ -z "$STDOUT" ]
   # No stderr hint.
   [ -z "$STDERR" ]
 }
@@ -86,7 +93,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -97,7 +104,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -108,7 +115,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -119,7 +126,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -131,7 +138,7 @@ run_handler() {
 @test "session-start: no passthru files and no settings.json -> marker created, no hint" {
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -141,7 +148,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -151,7 +158,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
@@ -160,18 +167,20 @@ run_handler() {
 # Actual hint path.
 # ---------------------------------------------------------------------------
 
-@test "session-start: settings.json with N allow entries -> hint on stderr mentions N and /passthru:bootstrap" {
+@test "session-start: settings.json with N allow entries -> hint on stdout mentions N and /passthru:bootstrap" {
   printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)","mcp__context7__query-docs"]}}' \
     > "$USER_ROOT/.claude/settings.json"
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
 
-  # Hint mentions the count (3) and the slash command name.
-  [[ "$STDERR" == *"Detected 3 importable rule(s)"* ]]
-  [[ "$STDERR" == *"/passthru:bootstrap"* ]]
-  [[ "$STDERR" == *"only shows once"* ]]
+  # Hint lands on stdout so Claude Code can surface it in the session header.
+  [[ "$STDOUT" == *"3 importable"* ]]
+  [[ "$STDOUT" == *"/passthru:bootstrap"* ]]
+  [[ "$STDOUT" == *"only shows once"* ]]
+
+  # Nothing on stderr in the happy path.
+  [ -z "$STDERR" ]
 
   # Marker is created so we do not re-hint.
   [ -f "$(marker_path)" ]
@@ -183,12 +192,13 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ -n "$STDERR" ]
+  [ -n "$STDOUT" ]
   [ -f "$(marker_path)" ]
 
-  # Second invocation must be silent.
+  # Second invocation must be silent on both streams.
   run_handler '{}'
   [ "$status" -eq 0 ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
 }
 
@@ -203,8 +213,8 @@ run_handler() {
 
   run_handler 'not-json{{{'
   [ "$status" -eq 0 ]
-  # stdout is still valid (either {} or the hint, but process did not crash).
-  [ "$STDOUT" = "{}" ]
+  # The hint should still fire (stdin is drained, never parsed).
+  [[ "$STDOUT" == *"/passthru:bootstrap"* ]]
   # Marker must still be touched since nothing else went wrong.
   [ -f "$(marker_path)" ]
 }
@@ -215,7 +225,7 @@ run_handler() {
 
   run_handler ''
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [[ "$STDOUT" == *"/passthru:bootstrap"* ]]
   [ -f "$(marker_path)" ]
 }
 
@@ -228,7 +238,7 @@ run_handler() {
 
   run_handler '{}'
   [ "$status" -eq 0 ]
-  [ "$STDOUT" = "{}" ]
+  [ -z "$STDOUT" ]
   [ -z "$STDERR" ]
   [ -f "$(marker_path)" ]
 }
