@@ -386,6 +386,138 @@ frontmatter_value() {
 }
 
 # ---------------------------------------------------------------------------
+# Tests - commands/list.md
+# ---------------------------------------------------------------------------
+
+@test "commands/list.md exists" {
+  [ -f "$COMMANDS_DIR/list.md" ]
+}
+
+@test "commands/list.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/list.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/list.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/list.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/list.md frontmatter argument-hint mentions key flags" {
+  run frontmatter_value "$COMMANDS_DIR/list.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--scope"* ]]
+  [[ "$output" == *"--list"* ]]
+  [[ "$output" == *"--source"* ]]
+  [[ "$output" == *"--format"* ]]
+  [[ "$output" == *"--flat"* ]]
+  [[ "$output" == *"--tool"* ]]
+}
+
+@test "commands/list.md body mentions list.sh" {
+  run grep -q "list.sh" "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md body mentions \$ARGUMENTS pass-through" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md body mentions scope and source concepts" {
+  run grep -q 'authored' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'imported' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md body points at /passthru:remove" {
+  run grep -q '/passthru:remove' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Tests - commands/remove.md
+# ---------------------------------------------------------------------------
+
+@test "commands/remove.md exists" {
+  [ -f "$COMMANDS_DIR/remove.md" ]
+}
+
+@test "commands/remove.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/remove.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/remove.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/remove.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/remove.md frontmatter argument-hint mentions the three positional slots" {
+  run frontmatter_value "$COMMANDS_DIR/remove.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scope"* ]]
+  [[ "$output" == *"list"* ]]
+  [[ "$output" == *"index"* ]]
+}
+
+@test "commands/remove.md body mentions remove-rule.sh" {
+  run grep -q "remove-rule.sh" "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body mentions \$ARGUMENTS hint" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body points at /passthru:list" {
+  run grep -q '/passthru:list' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body mentions imported-rule refusal path" {
+  run grep -qi 'imported' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'bootstrap' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body mentions all three exit codes" {
+  run grep -q 'Exit 0' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'Exit 1' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'Exit 2' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # Auto-iteration: every commands/*.md must have a well-formed frontmatter
 # block with non-empty description and argument-hint. Picks up new files
 # automatically so future command additions get baseline coverage.

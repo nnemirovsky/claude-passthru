@@ -12,6 +12,8 @@ commands/
   bootstrap.md         /passthru:bootstrap slash command (wraps scripts/bootstrap.sh with dry-run + confirm)
   add.md               /passthru:add slash command (prompt-based)
   suggest.md           /passthru:suggest slash command (prompt-based)
+  list.md              /passthru:list slash command (wraps scripts/list.sh)
+  remove.md            /passthru:remove slash command (wraps scripts/remove-rule.sh)
   verify.md            /passthru:verify slash command (prompt-based)
   log.md               /passthru:log slash command (prompt-based)
 hooks/
@@ -37,7 +39,9 @@ scripts/
                        Supported shapes: Bash(prefix:*) | Bash(exact) | mcp__* | WebFetch(domain:X)
                        | WebSearch | Read/Edit/Write(path[/**]) | Skill(name). Others -> [WARN] skip.
   write-rule.sh        atomic write wrapper: backup + append + verify + rollback
-  verify.sh            rule verifier CLI (also invoked by write-rule.sh and /passthru:verify)
+  remove-rule.sh       atomic remove wrapper: backup + splice + verify + rollback. Authored-only.
+  list.sh              rule list viewer CLI with scope/list/source/index annotations
+  verify.sh            rule verifier CLI (also invoked by write-rule.sh/remove-rule.sh and /passthru:verify)
   log.sh               audit-log viewer CLI + sentinel toggle
 tests/
   fixtures/            JSON fixture files used by bats tests
@@ -133,11 +137,12 @@ Checks performed (in order, across the merged set):
 ## Write-wrapper locking
 
 `scripts/write-rule.sh` (also called by `bootstrap.sh --write` and the
-`/passthru:add`, `/passthru:suggest` commands) serializes concurrent writers
-via a single user-scope lock directory at
-`~/.claude/passthru.write.lock.d`. The lock uses `mkdir`, which is atomic on
-every POSIX filesystem we target (local Linux/macOS plus NFS), works without
-any extra dependency, and polls at 100 ms intervals while waiting.
+`/passthru:add`, `/passthru:suggest` commands) and `scripts/remove-rule.sh`
+(called by `/passthru:remove`) serialize concurrent mutations via a single
+user-scope lock directory at `~/.claude/passthru.write.lock.d`. The lock
+uses `mkdir`, which is atomic on every POSIX filesystem we target (local
+Linux/macOS plus NFS), works without any extra dependency, and polls at
+100 ms intervals while waiting.
 
 The lock-acquisition timeout is 5 seconds by default and is configurable via
 `PASSTHRU_WRITE_LOCK_TIMEOUT=<seconds>` in the environment. Both
