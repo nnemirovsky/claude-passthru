@@ -63,12 +63,21 @@ fi
 # all live in common.sh and are shared with post-tool-use.sh and the
 # scripts/.
 
-# audit_write_line <event> <tool_name> <reason_or_empty> <rule_index_or_empty> <pattern_or_empty> <tool_use_id_or_empty>
+# audit_write_line <event> <tool_name> <reason_or_empty> <rule_index_or_empty> <pattern_or_empty> <tool_use_id_or_empty> [source]
 # Appends one JSONL line. Fails silently on write error (fail-open).
+#
+# The optional 7th argument overrides the `source` field. Accepted values:
+#   passthru       default, used by rule matches + plugin self-allow
+#   overlay        decision came from the terminal-overlay dialog (Task 8)
+#   passthru-mode  decision came from the replicated CC permission-mode
+#                  auto-allow fast path (Task 8)
+# Any other value is written verbatim (future-proofing). Empty -> `passthru`.
 audit_write_line() {
   audit_enabled || return 0
 
   local event="$1" tool="$2" reason="$3" rule_index="$4" pattern="$5" tool_use_id="$6"
+  local source="${7:-passthru}"
+  [ -z "$source" ] && source="passthru"
   local path ts line
   path="$(audit_log_path)"
   ts="$(passthru_iso_ts)"
@@ -82,6 +91,7 @@ audit_write_line() {
       --arg ts "$ts" \
       --arg event "$event" \
       --arg tool "$tool" \
+      --arg source "$source" \
       --arg reason "$reason" \
       --arg rule_index "$rule_index" \
       --arg pattern "$pattern" \
@@ -89,7 +99,7 @@ audit_write_line() {
       '{
         ts: $ts,
         event: $event,
-        source: "passthru",
+        source: $source,
         tool: $tool,
         reason: (if $reason == "" then null else $reason end),
         rule_index: (if $rule_index == "" then null else ($rule_index | tonumber) end),
@@ -227,6 +237,12 @@ fi
 TOOL_NAME="$(jq -r '.tool_name // ""' <<<"$INPUT" 2>/dev/null)"
 TOOL_INPUT="$(jq -c '.tool_input // {}' <<<"$INPUT" 2>/dev/null)"
 TOOL_USE_ID="$(jq -r '.tool_use_id // ""' <<<"$INPUT" 2>/dev/null)"
+# CC supplies permission_mode + cwd on the PreToolUse envelope. Missing fields
+# are treated as "default" mode / current PWD so behavior stays safe when the
+# plugin is invoked standalone (bats tests, pipe testing).
+PERMISSION_MODE="$(jq -r '.permission_mode // ""' <<<"$INPUT" 2>/dev/null)"
+CC_CWD="$(jq -r '.cwd // ""' <<<"$INPUT" 2>/dev/null)"
+[ -z "$CC_CWD" ] && CC_CWD="${PASSTHRU_PROJECT_DIR:-$PWD}"
 
 # GC old breadcrumbs early so every invocation keeps TMPDIR tidy. Does nothing
 # when audit is disabled.
@@ -370,12 +386,28 @@ fi
 # field deciding whether we emit "allow" or "ask". merged_idx is the rule's
 # position in the corresponding merged array (so audit rule_index stays
 # consistent with /passthru:list output).
+#
+# Task 8 decision order:
+#   1. deny[] first-match -> deny (handled above).
+#   2. ask[] match (ignoring allow[]) -> overlay path.
+#   3. allow[] match -> allow.
+#   4. no match + mode auto-allows -> passthrough (CC handles it).
+#   5. no match + mode does NOT auto-allow -> overlay path.
+#
+# We set OVERLAY_REASON when we decide overlay is the next step. Empty =>
+# no overlay needed. Carries the audit reason / pattern / rule_index through
+# to the overlay-result dispatch.
+OVERLAY_REASON=""
+OVERLAY_RULE_IDX=""
+OVERLAY_PATTERN=""
+
 ORDERED="$(build_ordered_allow_ask 2>/dev/null)"
 [ -z "$ORDERED" ] && ORDERED='[]'
 
 ORDERED_COUNT="$(jq -r 'if type == "array" then length else 0 end' <<<"$ORDERED" 2>/dev/null)"
 [ -z "$ORDERED_COUNT" ] && ORDERED_COUNT=0
 
+MATCHED=""   # "allow" | "ask" | ""
 if [ "$ORDERED_COUNT" -gt 0 ]; then
   i=0
   while [ "$i" -lt "$ORDERED_COUNT" ]; do
@@ -396,18 +428,13 @@ if [ "$ORDERED_COUNT" -gt 0 ]; then
       exit 0
     fi
     if [ "$mrc" -eq 0 ]; then
+      MATCHED="$LIST_TYPE"
       REASON="$(jq -r '.reason // ""' <<<"$RULE" 2>/dev/null)"
       PATTERN="$(rule_pattern_summary "$RULE")"
-      if [ "$LIST_TYPE" = "ask" ]; then
-        if [ -n "$REASON" ]; then
-          MSG="passthru ask: ${REASON}"
-        else
-          MSG="passthru ask: matched rule [${PATTERN}]"
-        fi
-        emit_decision "ask" "$MSG"
-        audit_write_line "ask" "$TOOL_NAME" "$REASON" "$RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
-        exit 0
-      else
+      OVERLAY_REASON="$REASON"
+      OVERLAY_RULE_IDX="$RULE_IDX"
+      OVERLAY_PATTERN="$PATTERN"
+      if [ "$LIST_TYPE" = "allow" ]; then
         if [ -n "$REASON" ]; then
           MSG="passthru allow: ${REASON}"
         else
@@ -417,12 +444,245 @@ if [ "$ORDERED_COUNT" -gt 0 ]; then
         audit_write_line "allow" "$TOOL_NAME" "$REASON" "$RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
         exit 0
       fi
+      # ask match: break out of the loop and head to the overlay path.
+      break
     fi
     i=$((i + 1))
   done
 fi
 
-# --- 7. Passthrough --------------------------------------------------------
+# --- 7. Mode-based auto-allow shortcut -------------------------------------
+# Only consult the permission-mode fast path if no ask[] rule matched. An
+# ask-rule always wins over mode-based auto-allow because the user declared
+# an explicit "prompt me on this" intent.
+if [ "$MATCHED" != "ask" ]; then
+  if permission_mode_auto_allows "$PERMISSION_MODE" "$TOOL_NAME" "$TOOL_INPUT" "$CC_CWD" 2>/dev/null; then
+    # CC itself would auto-allow this call. Emit passthrough and record
+    # the decision under source="passthru-mode" so the audit log can
+    # distinguish mode-driven allow from rule-driven allow.
+    audit_write_line "passthrough" "$TOOL_NAME" "mode:${PERMISSION_MODE:-default}" "" "" "$TOOL_USE_ID" "passthru-mode"
+    emit_passthrough
+    exit 0
+  fi
+fi
+
+# --- 8. Overlay path -------------------------------------------------------
+# Reached when either:
+#   * an ask[] rule matched, or
+#   * no rule matched AND mode did NOT auto-allow.
+# The overlay launches an interactive popup inside the user's multiplexer
+# (tmux/kitty/wezterm). Result values drive the final decision:
+#   yes_once    -> allow (this call only)
+#   no_once     -> deny (this call only)
+#   yes_always  -> write allow rule + allow this call
+#   no_always   -> write deny rule + deny this call
+#   cancel      -> permissionDecision:"ask" (native dialog fallback)
+#   launch failure / overlay disabled / overlay unavailable
+#               -> permissionDecision:"ask" (native dialog fallback)
+
+# The reason carried forward to the user if we end up emitting a native-ask
+# fallback ("permissionDecision":"ask"). For ask-rule matches we preserve
+# the rule's reason; for no-match-fallback we synthesize a neutral reason.
+FALLBACK_ASK_REASON=""
+if [ "$MATCHED" = "ask" ]; then
+  if [ -n "$OVERLAY_REASON" ]; then
+    FALLBACK_ASK_REASON="passthru ask: ${OVERLAY_REASON}"
+  else
+    FALLBACK_ASK_REASON="passthru ask: matched rule [${OVERLAY_PATTERN}]"
+  fi
+else
+  FALLBACK_ASK_REASON="passthru: no rule matched and mode ${PERMISSION_MODE:-default} does not auto-allow"
+fi
+
+# Overlay opt-out short-circuit: sentinel present -> skip overlay entirely,
+# emit the native-dialog fallback.
+if overlay_disabled; then
+  emit_decision "ask" "$FALLBACK_ASK_REASON"
+  if [ "$MATCHED" = "ask" ]; then
+    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
+  else
+    audit_write_line "ask" "$TOOL_NAME" "overlay disabled" "" "" "$TOOL_USE_ID"
+  fi
+  exit 0
+fi
+
+# No multiplexer available: warn + emit native-dialog fallback. Log one
+# stderr line per call (session-level dedup is fine to defer).
+if ! overlay_available; then
+  printf '[passthru] overlay enabled but no supported multiplexer (tmux/kitty/wezterm); falling back to native dialog\n' >&2
+  emit_decision "ask" "$FALLBACK_ASK_REASON"
+  if [ "$MATCHED" = "ask" ]; then
+    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
+  else
+    audit_write_line "ask" "$TOOL_NAME" "overlay unavailable" "" "" "$TOOL_USE_ID"
+  fi
+  exit 0
+fi
+
+# Overlay is available. Prep the per-call result file, invoke overlay.sh,
+# read the verdict, and fan out to allow/deny/native-ask.
+_overlay_root="${CLAUDE_PLUGIN_ROOT:-}"
+if [ -z "$_overlay_root" ]; then
+  _PASSTHRU_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _overlay_root="$(cd "${_PASSTHRU_SCRIPT_DIR}/../.." && pwd)"
+fi
+OVERLAY_SH="${_overlay_root}/scripts/overlay.sh"
+
+if [ ! -f "$OVERLAY_SH" ]; then
+  # Missing script is the same failure shape as a launch error: warn + fall
+  # through to native dialog.
+  printf '[passthru] overlay script not found at %s; falling back to native dialog\n' "$OVERLAY_SH" >&2
+  emit_decision "ask" "$FALLBACK_ASK_REASON"
+  if [ "$MATCHED" = "ask" ]; then
+    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
+  else
+    audit_write_line "ask" "$TOOL_NAME" "overlay script missing" "" "" "$TOOL_USE_ID"
+  fi
+  exit 0
+fi
+
+# Per-call result file. Use sanitized tool_use_id when available so
+# concurrent calls do not clobber each other; fall back to mktemp otherwise.
+_tmpdir="$(passthru_tmpdir)"
+[ -d "$_tmpdir" ] || mkdir -p "$_tmpdir" 2>/dev/null || true
+_safe_id="$(sanitize_tool_use_id "$TOOL_USE_ID")"
+if [ -n "$_safe_id" ]; then
+  OVERLAY_RESULT="${_tmpdir}/passthru-overlay-${_safe_id}.txt"
+  # Remove any stale artifact from a previous call with the same id.
+  rm -f "$OVERLAY_RESULT" 2>/dev/null || true
+else
+  OVERLAY_RESULT="$(mktemp "${_tmpdir}/passthru-overlay.XXXXXX" 2>/dev/null || printf '%s/passthru-overlay-%s.txt' "$_tmpdir" "$$")"
+  # mktemp creates an empty file; we want the absent-file cancel signal
+  # from overlay-dialog to work, so drop it here.
+  rm -f "$OVERLAY_RESULT" 2>/dev/null || true
+fi
+
+# Export the env contract for overlay.sh + overlay-dialog.sh.
+export PASSTHRU_OVERLAY_RESULT_FILE="$OVERLAY_RESULT"
+export PASSTHRU_OVERLAY_TOOL_NAME="$TOOL_NAME"
+export PASSTHRU_OVERLAY_TOOL_INPUT_JSON="$TOOL_INPUT"
+
+# Invoke the overlay and capture its exit code. We have an ERR trap in place
+# (converts unexpected errors to fail-open passthrough), so we cannot rely on
+# `set +e` alone: the trap fires on any non-zero exit regardless. Disable the
+# ERR trap around the overlay call, then re-arm it.
+trap - ERR
+set +e
+bash "$OVERLAY_SH"
+OVERLAY_RC=$?
+set -e
+trap 'printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
+
+if [ "$OVERLAY_RC" -ne 0 ]; then
+  # Launch failure (rc 1 = no multiplexer detected at launch time, rc 2 =
+  # popup error). Warn + fall through to native dialog so the user still
+  # gets to approve/deny.
+  printf '[passthru] overlay.sh exited %d; falling back to native dialog\n' "$OVERLAY_RC" >&2
+  emit_decision "ask" "$FALLBACK_ASK_REASON"
+  if [ "$MATCHED" = "ask" ]; then
+    audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
+  else
+    audit_write_line "ask" "$TOOL_NAME" "overlay launch failure" "" "" "$TOOL_USE_ID"
+  fi
+  exit 0
+fi
+
+# Read the verdict. Absent / empty file -> cancel.
+VERDICT=""
+RULE_JSON_LINE=""
+if [ -s "$OVERLAY_RESULT" ]; then
+  VERDICT="$(head -n 1 "$OVERLAY_RESULT" 2>/dev/null || true)"
+  RULE_JSON_LINE="$(sed -n '2p' "$OVERLAY_RESULT" 2>/dev/null || true)"
+fi
+# Best-effort cleanup of the result file; harmless if the file is already
+# missing.
+rm -f "$OVERLAY_RESULT" 2>/dev/null || true
+
+case "$VERDICT" in
+  yes_once)
+    MSG="overlay: user approved once"
+    emit_decision "allow" "$MSG"
+    audit_write_line "allow" "$TOOL_NAME" "user approved once" "" "" "$TOOL_USE_ID" "overlay"
+    exit 0
+    ;;
+  no_once)
+    MSG="overlay: user denied once"
+    emit_decision "deny" "$MSG"
+    audit_write_line "deny" "$TOOL_NAME" "user denied once" "" "" "$TOOL_USE_ID" "overlay"
+    exit 0
+    ;;
+  yes_always|no_always)
+    # Persist the proposed rule via write-rule.sh. Scope defaults to user
+    # unless the rule JSON explicitly carries a "scope" field; we honor
+    # "user" / "project" and ignore unknown values.
+    target_list="allow"
+    [ "$VERDICT" = "no_always" ] && target_list="deny"
+    target_scope="user"
+    if [ -n "$RULE_JSON_LINE" ] && jq -e '.' >/dev/null 2>&1 <<<"$RULE_JSON_LINE"; then
+      _requested_scope="$(jq -r '.scope // ""' <<<"$RULE_JSON_LINE" 2>/dev/null || printf '')"
+      case "$_requested_scope" in
+        user|project) target_scope="$_requested_scope" ;;
+      esac
+      # Strip any helper fields before persisting the rule so write-rule.sh
+      # sees a clean {tool,match,reason} shape.
+      _rule_to_write="$(jq -c 'del(.scope)' <<<"$RULE_JSON_LINE" 2>/dev/null || printf '%s' "$RULE_JSON_LINE")"
+
+      _write_rc=0
+      WRITE_RULE_SH="${_overlay_root}/scripts/write-rule.sh"
+      if [ -f "$WRITE_RULE_SH" ]; then
+        # Same ERR-trap dance as the overlay invocation: disable before, re-arm
+        # after, so a non-zero write-rule.sh does not tumble into the fail-open
+        # passthrough path.
+        trap - ERR
+        set +e
+        bash "$WRITE_RULE_SH" "$target_scope" "$target_list" "$_rule_to_write" >/dev/null 2>&1
+        _write_rc=$?
+        set -e
+        trap 'printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
+      else
+        _write_rc=1
+      fi
+      if [ "$_write_rc" -ne 0 ]; then
+        printf '[passthru] overlay: write-rule.sh failed rc=%d for %s/%s; applying decision for this call only\n' \
+          "$_write_rc" "$target_scope" "$target_list" >&2
+      fi
+    else
+      printf '[passthru] overlay: %s verdict without valid rule JSON; applying decision for this call only\n' \
+        "$VERDICT" >&2
+    fi
+
+    if [ "$VERDICT" = "yes_always" ]; then
+      MSG="overlay: user approved always"
+      emit_decision "allow" "$MSG"
+      audit_write_line "allow" "$TOOL_NAME" "user approved always" "" "" "$TOOL_USE_ID" "overlay"
+    else
+      MSG="overlay: user denied always"
+      emit_decision "deny" "$MSG"
+      audit_write_line "deny" "$TOOL_NAME" "user denied always" "" "" "$TOOL_USE_ID" "overlay"
+    fi
+    exit 0
+    ;;
+  cancel|'')
+    # Explicit cancel OR absent/empty result file both collapse to the
+    # native-dialog fallback.
+    emit_decision "ask" "$FALLBACK_ASK_REASON"
+    if [ "$MATCHED" = "ask" ]; then
+      audit_write_line "ask" "$TOOL_NAME" "$OVERLAY_REASON" "$OVERLAY_RULE_IDX" "$OVERLAY_PATTERN" "$TOOL_USE_ID"
+    else
+      audit_write_line "ask" "$TOOL_NAME" "overlay cancel" "" "" "$TOOL_USE_ID"
+    fi
+    exit 0
+    ;;
+  *)
+    # Unknown verdict string: treat as cancel (fail-safe).
+    printf '[passthru] overlay: unknown verdict %s; falling back to native dialog\n' "$VERDICT" >&2
+    emit_decision "ask" "$FALLBACK_ASK_REASON"
+    audit_write_line "ask" "$TOOL_NAME" "overlay unknown verdict" "" "" "$TOOL_USE_ID"
+    exit 0
+    ;;
+esac
+
+# Unreachable, but keep the passthrough as a final fail-open safety net.
 audit_write_line "passthrough" "$TOOL_NAME" "" "" "" "$TOOL_USE_ID"
 audit_write_breadcrumb "$TOOL_USE_ID" "$TOOL_NAME" "$TOOL_INPUT"
 emit_passthrough

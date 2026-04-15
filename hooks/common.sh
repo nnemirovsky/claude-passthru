@@ -288,6 +288,184 @@ emit_passthrough() {
 }
 
 # ---------------------------------------------------------------------------
+# Overlay + permission-mode helpers
+# ---------------------------------------------------------------------------
+#
+# These helpers are consumed by the PreToolUse hook in the Task 8 wiring so
+# the same detection logic lives in one place (rather than drifting between
+# the hook and `scripts/overlay.sh`). Keeping them in common.sh also makes
+# them easy to unit test without spawning a whole hook invocation.
+
+# overlay_disabled: returns 0 if the opt-out sentinel
+# `~/.claude/passthru.overlay.disabled` exists, 1 otherwise. Honors
+# PASSTHRU_USER_HOME so bats tests can plant / remove the sentinel freely.
+overlay_disabled() {
+  local sentinel
+  sentinel="$(passthru_user_home)/.claude/passthru.overlay.disabled"
+  [ -e "$sentinel" ]
+}
+
+# detect_overlay_multiplexer: internal detection shared with scripts/overlay.sh.
+# Emits one of `tmux` / `kitty` / `wezterm` on stdout when a candidate env var
+# is set AND its binary is on PATH. Returns 0 on success, 1 when nothing is
+# usable (empty stdout).
+#
+# Order of preference matches scripts/overlay.sh exactly: tmux -> kitty ->
+# wezterm. Both call sites (the hook via overlay_available and overlay.sh
+# via its own detect_multiplexer) need to agree or the hook would claim the
+# overlay is usable when overlay.sh would then refuse to launch.
+detect_overlay_multiplexer() {
+  if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    printf 'tmux'
+    return 0
+  fi
+  if [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitty >/dev/null 2>&1; then
+    printf 'kitty'
+    return 0
+  fi
+  if [ -n "${WEZTERM_PANE:-}" ] && command -v wezterm >/dev/null 2>&1; then
+    printf 'wezterm'
+    return 0
+  fi
+  printf ''
+  return 1
+}
+
+# overlay_available: returns 0 if at least one supported multiplexer is both
+# announced (via env var) AND has its binary on PATH. Thin wrapper around
+# detect_overlay_multiplexer for readable hook decision sites.
+overlay_available() {
+  local mux
+  mux="$(detect_overlay_multiplexer 2>/dev/null || true)"
+  [ -n "$mux" ]
+}
+
+# permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>
+#
+# Returns 0 if Claude Code itself would auto-allow this tool call in the given
+# permission mode, 1 otherwise.
+#
+# This is a *best-effort replication* of CC's internal
+# src/utils/permissions/pathValidation.ts + per-tool auto-allow checkers. It
+# is intentionally conservative: we err toward prompting the user (overlay
+# path) rather than auto-allowing. Divergences (all in the SAFER direction):
+#   - Symlink resolution: we use literal prefix match on "$cwd/". CC uses
+#     realpathSync + pathInWorkingPath which follows symlinks. A symlink
+#     `$cwd/link -> /elsewhere/foo` that CC would auto-allow via the real
+#     path is NOT auto-allowed here (it falls through to overlay).
+#   - `..` traversal: any path containing `/../` is rejected outright, even
+#     when its literal prefix starts with $cwd/. CC's containsPathTraversal
+#     covers this via path normalization.
+#   - additionalAllowedWorkingDirs / sandbox allowlists / CC's internal
+#     scratchpad paths: not considered. Calls to those dirs fall through.
+#
+# Mode behavior:
+#   bypassPermissions: always 0 (everything auto-allowed).
+#   acceptEdits:      0 for Write/Edit/NotebookEdit/MultiEdit when the
+#                     target file_path resolves inside cwd. Non-edit tools
+#                     in acceptEdits return 1.
+#   default (+ empty mode value): 0 for read-only tools
+#                     (Read/Grep/Glob/NotebookRead/LS) when the target path
+#                     is inside cwd, plus WebFetch/WebSearch (CC auto-allows
+#                     these without a path check). Everything else returns 1.
+#   plan:             0 for Read/Grep/Glob/NotebookRead/LS (read-only,
+#                     mutating tools are blocked by plan mode anyway). 1
+#                     for any mutating tool.
+#   Unknown mode:     1 (fail-safe: run the overlay).
+permission_mode_auto_allows() {
+  local mode="$1" tool_name="$2" tool_input="$3" cwd="$4"
+
+  # A bypassPermissions session auto-allows every tool call - mirror that.
+  if [ "$mode" = "bypassPermissions" ]; then
+    return 0
+  fi
+
+  # Empty string / unset mode is treated as "default".
+  [ -z "$mode" ] && mode="default"
+
+  # Helper: return 0 when path is literally inside cwd and free of ../
+  # traversal. We do NOT canonicalize paths, so a symlink inside cwd
+  # pointing outside cwd still passes - documented as a known limitation.
+  _pm_path_inside_cwd() {
+    local p="$1" c="$2"
+    [ -z "$p" ] && return 1
+    [ -z "$c" ] && return 1
+    # Reject `..` traversal anywhere in the path (including the middle).
+    case "$p" in
+      *'/../'*|*'/..') return 1 ;;
+    esac
+    # Literal prefix check: path must start with "$cwd/" (not just "$cwd").
+    case "$p" in
+      "$c"/*) return 0 ;;
+    esac
+    return 1
+  }
+
+  case "$mode" in
+    acceptEdits)
+      case "$tool_name" in
+        Write|Edit|NotebookEdit|MultiEdit)
+          local fp
+          fp="$(jq -r '.file_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          if _pm_path_inside_cwd "$fp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    default)
+      case "$tool_name" in
+        Read|NotebookRead)
+          local fp
+          fp="$(jq -r '.file_path // .notebook_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          if _pm_path_inside_cwd "$fp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        Grep|Glob|LS)
+          local gp
+          gp="$(jq -r '.path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          # Grep/Glob/LS without a path default to cwd - auto-allow that.
+          if [ -z "$gp" ]; then
+            return 0
+          fi
+          if _pm_path_inside_cwd "$gp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        WebFetch|WebSearch)
+          # CC auto-allows these in default mode (no path check).
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    plan)
+      case "$tool_name" in
+        Read|Grep|Glob|NotebookRead|LS)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      # Unknown mode (e.g. future CC addition). Fail-safe: run the overlay.
+      return 1
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Post-hook classification helpers
 # ---------------------------------------------------------------------------
 #

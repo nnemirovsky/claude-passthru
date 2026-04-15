@@ -168,8 +168,26 @@ concurrent project shells.
 
 ## Hook timeout
 
-Both `PreToolUse` and `PostToolUse` are registered with `"timeout": 10` in
-`hooks/hooks.json`. The reason for 10 seconds (rather than 2-3):
+`PostToolUse`, `PostToolUseFailure`, and `SessionStart` are registered with
+short timeouts (10s / 10s / 5s) in `hooks/hooks.json`. `PreToolUse` runs with
+a **75s** timeout because Task 8 (v0.5.0) wired the hook to block
+synchronously on the interactive terminal-overlay dialog.
+
+The 75s figure breaks down as:
+
+* The overlay dialog (`scripts/overlay-dialog.sh`) enforces its own 60s
+  budget (`PASSTHRU_OVERLAY_TIMEOUT`, default 60s).
+* Add 15s of margin for overlay launch, multiplexer roundtrip, post-dialog
+  rule write via `write-rule.sh`, and audit line emission.
+* CC's hook timeout is wall-clock (confirmed via `time sleep 1`: 1.008s
+  real). Anything below the overlay's own budget would kill the hook
+  mid-dialog and lose the user's verdict.
+
+The 10s baseline for non-overlay PreToolUse paths (rule match, mode
+auto-allow) still applies in the sense that none of them block on IO; the
+75s cap only matters when the overlay is actually invoked.
+
+For post-event handlers, the original 10s baseline continues to hold:
 
 * `load_rules` shells out to `jq` once per rule file (up to 4 files), once for
   the parse check, once for normalization, and once for the merge.
@@ -183,8 +201,9 @@ Both `PreToolUse` and `PostToolUse` are registered with `"timeout": 10` in
   audit fidelity, never block a tool call. Choosing 10s leaves 5x headroom
   over typical worst case.
 
-Lower the timeout only after profiling on the target hardware. Higher is
-fine.
+Lower the PreToolUse timeout only after also lowering
+`PASSTHRU_OVERLAY_TIMEOUT` (and only after profiling on target hardware).
+Raising it is always safe since the handler fails open on timeout.
 
 ## Releases
 

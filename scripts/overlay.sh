@@ -35,7 +35,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Locate sibling scripts
+# Locate sibling scripts + common.sh
 # ---------------------------------------------------------------------------
 if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/overlay-dialog.sh" ]; then
   _PASSTHRU_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
@@ -48,6 +48,14 @@ DIALOG="${_PASSTHRU_PLUGIN_ROOT}/scripts/overlay-dialog.sh"
 if [ ! -f "$DIALOG" ]; then
   printf 'overlay.sh: cannot locate dialog script: %s\n' "$DIALOG" >&2
   exit 2
+fi
+
+# Source common.sh to pick up detect_overlay_multiplexer. Keeping the
+# detection logic centralized means this script and the hook cannot disagree
+# about which multiplexers are "available".
+if [ -f "${_PASSTHRU_PLUGIN_ROOT}/hooks/common.sh" ]; then
+  # shellcheck disable=SC1091
+  source "${_PASSTHRU_PLUGIN_ROOT}/hooks/common.sh"
 fi
 
 # ---------------------------------------------------------------------------
@@ -74,8 +82,17 @@ TIMEOUT="${PASSTHRU_OVERLAY_TIMEOUT:-60}"
 # but the binary is missing, fall through to the next candidate rather than
 # failing fast (user may have $TMUX exported from a parent shell but tmux
 # itself uninstalled on this host, or a stripped-down container image).
+#
+# The real detection lives in common.sh::detect_overlay_multiplexer so the
+# hook's overlay_available() helper sees an identical result. The local copy
+# below is only used when common.sh is not sourced (unlikely, but a safety net
+# for a pure-script install shape).
 
 detect_multiplexer() {
+  if command -v detect_overlay_multiplexer >/dev/null 2>&1; then
+    detect_overlay_multiplexer
+    return $?
+  fi
   if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     printf 'tmux'
     return 0

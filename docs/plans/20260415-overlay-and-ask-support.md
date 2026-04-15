@@ -436,15 +436,15 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `hooks/common.sh` (add `permission_mode_auto_allows`, `overlay_available`, `overlay_disabled` helpers)
 - Modify: `tests/hook_handler.bats` (mode-based auto-allow tests + overlay-invocation tests)
 
-- [ ] add `permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>` in common.sh. Returns 0 if CC would auto-allow in this mode (bypassPermissions, acceptEdits+Write/Edit in cwd, default+Read in cwd, plan). Returns 1 otherwise
-- [ ] add `overlay_disabled` helper: checks `~/.claude/passthru.overlay.disabled`
-- [ ] add `overlay_available` helper: detects a supported terminal multiplexer. Returns 0 if at least one is present + binary available
-- [ ] extend pre-tool-use.sh decision order:
+- [x] add `permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>` in common.sh. Returns 0 if CC would auto-allow in this mode (bypassPermissions, acceptEdits+Write/Edit in cwd, default+Read in cwd, plan). Returns 1 otherwise
+- [x] add `overlay_disabled` helper: checks `~/.claude/passthru.overlay.disabled`
+- [x] add `overlay_available` helper: detects a supported terminal multiplexer. Returns 0 if at least one is present + binary available *(shared detect_overlay_multiplexer now lives in common.sh; overlay.sh delegates to it)*
+- [x] extend pre-tool-use.sh decision order:
   - deny match -> deny, done
   - ask match -> overlay path
   - allow match -> allow, done
   - no match -> check `permission_mode_auto_allows`: yes -> emit continue:true, done. no -> overlay path
-- [ ] overlay path:
+- [x] overlay path:
   - overlay disabled -> emit permissionDecision:"ask", done
   - overlay unavailable (no multiplexer) -> log `[passthru] overlay enabled but no supported multiplexer (tmux/kitty/wezterm), falling back to native dialog` to stderr, emit permissionDecision:"ask", done
   - overlay available -> invoke `scripts/overlay.sh`, read result:
@@ -453,11 +453,11 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
     * yes_always / no_always -> write rule via write-rule.sh (allow / deny), then emit the same decision for this call
     * cancel -> emit permissionDecision:"ask" (fall through to native)
     * error / timeout -> log stderr, emit permissionDecision:"ask"
-- [ ] audit log extension: on overlay-driven allow/deny, log with `source: "overlay"` (new source value alongside "passthru" and "native")
-- [ ] hook timeout consideration: keep at 10s. Overlay script has its own timeout (60s default?) so the outer hook timeout is not the bottleneck. Discussion: do we need to bump the hook timeout for interactive cases? Decision: no; overlay.sh runs synchronously and CC's hook dispatch respects it. Document the caveat
-- [ ] bats: permission_mode == "bypassPermissions" -> allow emitted; acceptEdits + Write in cwd -> allow; acceptEdits + Write outside cwd -> overlay path; default + Read in cwd -> continue; default + Read outside cwd -> overlay path; overlay disabled sentinel -> emit ask; no multiplexer -> stderr warning + emit ask; overlay returns yes_once -> allow emitted; overlay returns yes_always -> rule written + allow emitted; overlay returns cancel -> emit ask; `$CWD/../outside` in acceptEdits mode is NOT auto-allowed (path-traversal safety); symlinked `$CWD/link` falls through to overlay (not auto-allowed via literal prefix)
-- [ ] mock overlay.sh in tests via PATH override with a script that reads `$PASSTHRU_OVERLAY_MOCK_ANSWER` env var
-- [ ] run full suite
+- [x] audit log extension: on overlay-driven allow/deny, log with `source: "overlay"` (new source value alongside "passthru" and "native"). Mode auto-allow logs `source: "passthru-mode"` to disambiguate rule-allow vs mode-allow.
+- [x] hook timeout consideration: **bumped PreToolUse timeout from 10s to 75s** (60s overlay budget + 15s margin). CC's hook timeout is wall-clock (confirmed via `time sleep 1`), so anything below the overlay budget would kill the hook mid-dialog. The plan's original "keep at 10s" guidance was stale. Documented in CLAUDE.md "Hook timeout" section and asserted in `tests/plugin_loads.bats`.
+- [x] bats: permission_mode == "bypassPermissions" -> allow emitted; acceptEdits + Write in cwd -> allow; acceptEdits + Write outside cwd -> overlay path; default + Read in cwd -> continue; default + Read outside cwd -> overlay path; overlay disabled sentinel -> emit ask; no multiplexer -> stderr warning + emit ask; overlay returns yes_once -> allow emitted; overlay returns yes_always -> rule written + allow emitted; overlay returns cancel -> emit ask; `$CWD/../outside` in acceptEdits mode is NOT auto-allowed (path-traversal safety); symlinked `$CWD/link` falls through to overlay (not auto-allowed via literal prefix)
+- [x] mock overlay.sh in tests via CLAUDE_PLUGIN_ROOT shadow tree with a stub `scripts/overlay.sh` that writes the verdict literal to `$PASSTHRU_OVERLAY_RESULT_FILE`. Real plugin files (hooks/common.sh, write-rule.sh, verify.sh) are symlinked from the stub root so the hook's support scripts still work
+- [x] run full suite *(675/675, baseline 651 + 24 new Task 8 tests)*
 
 ### Task 9: Overlay toggle UX
 
