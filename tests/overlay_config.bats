@@ -17,12 +17,26 @@ setup() {
 
   export PASSTHRU_USER_HOME="$USER_ROOT"
   SENT_PATH="$USER_ROOT/.claude/passthru.overlay.disabled"
+  ORIGINAL_PATH="$PATH"
 
-  # Pin PATH to a minimal skeleton with $BIN in front so tests that want a
-  # multiplexer binary drop it in $BIN, and tests that want the binary
-  # missing simply don't drop anything there. /usr/bin + /bin give us awk,
-  # printf, rm, cat, etc. for the script body.
-  MINIMAL_PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+  # Build a sanitized PATH that excludes any pre-installed tmux/kitty/wezterm
+  # (Ubuntu CI ships tmux at /usr/bin/tmux). Broken-symlink masking is
+  # unreliable across bash versions. Instead we symlink only needed utilities.
+  SAFE_BIN="$TMP/safe_bin"
+  mkdir -p "$SAFE_BIN"
+  local cmd
+  for cmd in jq perl bash cat sed awk printf tr sort uniq comm head tail \
+             mkdir rm cp mv ln ls chmod date mktemp find grep wc tee touch \
+             dirname basename realpath readlink env sha256sum shasum; do
+    local src
+    src="$(command -v "$cmd" 2>/dev/null || true)"
+    if [ -n "$src" ] && [ -x "$src" ]; then
+      ln -sf "$src" "$SAFE_BIN/$cmd"
+    fi
+  done
+  # On Ubuntu 22.04+, /bin symlinks to /usr/bin which contains tmux.
+  # Exclude all system dirs. SAFE_BIN has everything we need.
+  MINIMAL_PATH="$BIN:$SAFE_BIN"
   export PATH="$MINIMAL_PATH"
 
   # Scrub every multiplexer env var so bats' parent shell never leaks
@@ -33,22 +47,10 @@ setup() {
 
   # Plain output (no ANSI, no tty quirks).
   export TERM=dumb
-
-  # Mask any pre-installed tmux/kitty/wezterm on /usr/bin (Ubuntu CI ships
-  # tmux at /usr/bin/tmux). A broken symlink in $BIN makes `command -v tmux`
-  # exit 1 even though the real binary is later on PATH. Regular non-exec
-  # files do NOT work: bash's `command -v` returns 0 on any file that exists
-  # on PATH regardless of the x-bit. Tests that want a multiplexer "on PATH"
-  # call plant_stub, which removes the mask and overwrites it with an
-  # executable stub.
-  local name
-  for name in tmux kitty wezterm; do
-    rm -f "$BIN/$name"
-    ln -s "/nonexistent/$name-masked-by-test" "$BIN/$name"
-  done
 }
 
 teardown() {
+  export PATH="$ORIGINAL_PATH"
   [ -n "${TMP:-}" ] && rm -rf "$TMP"
 }
 

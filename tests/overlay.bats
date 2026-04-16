@@ -21,11 +21,26 @@ setup() {
   BIN="$TMP/bin"
   mkdir -p "$BIN"
 
-  # Start every test with a PATH that excludes any real tmux/kitty/wezterm.
-  # Tests that want a given multiplexer plant its stub into $BIN under the
-  # real name and re-export PATH with $BIN in front.
-  MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-  # Honor the harness BATS_LIB_PATH if present so `bats` itself still works.
+  # Build a sanitized MINIMAL_PATH that includes essential utilities but
+  # excludes any pre-installed tmux/kitty/wezterm (Ubuntu CI ships tmux at
+  # /usr/bin/tmux). Broken-symlink masking is unreliable across bash versions
+  # (Linux bash 5.1+ skips broken symlinks in command -v PATH search). Instead
+  # we symlink only the utilities we need into a clean directory.
+  SAFE_BIN="$TMP/safe_bin"
+  mkdir -p "$SAFE_BIN"
+  local cmd
+  for cmd in jq perl bash cat sed awk printf tr sort uniq comm head tail \
+             mkdir rm cp mv ln ls chmod date mktemp find grep wc tee touch \
+             dirname basename realpath readlink env sha256sum shasum; do
+    local src
+    src="$(command -v "$cmd" 2>/dev/null || true)"
+    if [ -n "$src" ] && [ -x "$src" ]; then
+      ln -sf "$src" "$SAFE_BIN/$cmd"
+    fi
+  done
+  # On Ubuntu 22.04+, /bin symlinks to /usr/bin which contains tmux.
+  # Exclude all system dirs. SAFE_BIN has everything we need.
+  MINIMAL_PATH="$SAFE_BIN"
   ORIGINAL_PATH="$PATH"
 
   # Common env for the overlay scripts.
@@ -40,27 +55,12 @@ setup() {
   unset PASSTHRU_OVERLAY_TEST_ANSWER
   unset PASSTHRU_OVERLAY_TOOL_NAME
   unset PASSTHRU_OVERLAY_TOOL_INPUT_JSON
-
-  # Mask any pre-installed tmux/kitty/wezterm at /usr/bin (Ubuntu CI runners
-  # ship tmux by default). A broken symlink in $BIN makes `command -v tmux`
-  # exit 1 even though the real binary exists later on PATH. Non-executable
-  # regular files do NOT work for this because bash's `command -v` returns
-  # 0 on any file that exists on PATH regardless of the x-bit. Tests that
-  # want a multiplexer "on PATH" call plant_stub, which overwrites the mask
-  # with an executable stub.
-  mask_multiplexers() {
-    local name
-    for name in tmux kitty wezterm; do
-      rm -f "$BIN/$name"
-      ln -s "/nonexistent/$name-masked-by-test" "$BIN/$name"
-    done
-  }
-  mask_multiplexers
-  # Every code path that sets PATH goes through plant_stub or restricted_path.
-  # Both paths put $BIN first, so the masks are effective.
 }
 
 teardown() {
+  # Restore PATH first so bats' internal cleanup (bats-exec-test line 205)
+  # can find rm after we delete $SAFE_BIN (which lives inside $TMP).
+  export PATH="$ORIGINAL_PATH"
   [ -n "${TMP:-}" ] && rm -rf "$TMP"
 }
 
@@ -76,8 +76,8 @@ plant_stub() {
 }
 
 restricted_path() {
-  # Force a PATH with no multiplexers on it. $BIN goes first so the
-  # non-executable masks planted in setup() shadow any /usr/bin multiplexer.
+  # Force a PATH with no multiplexers. $BIN (for stubs) + $SAFE_BIN (clean
+  # utils) + fallback system dirs. No tmux/kitty/wezterm anywhere.
   export PATH="$BIN:$MINIMAL_PATH"
 }
 
