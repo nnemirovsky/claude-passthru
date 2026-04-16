@@ -434,15 +434,15 @@ while true; do
           # Two-field editor below.
           printf '\033[H\033[2J'
           printf "${BOLD}Edit Rule${RESET}\n\n"
-          printf "Edit each field. Leave blank to keep the suggested value.\n\n"
-          printf "Tool regex ${DIM}[%s]${RESET}: " "$prop_tool"
+          printf "Edit each field (pre-filled, use arrow keys to navigate).\n\n"
+          printf "Tool regex: "
           edited_tool=""
-          IFS= read -r -e -t "$TIMEOUT" edited_tool || true
+          IFS= read -r -e -i "$prop_tool" -t "$TIMEOUT" edited_tool || true
           [ -z "$edited_tool" ] && edited_tool="$prop_tool"
           if [ -n "$prop_match_key" ]; then
-            printf "Match %s ${DIM}[%s]${RESET}: " "$prop_match_key" "$prop_match_val"
+            printf "Match %s: " "$prop_match_key"
             edited_match=""
-            IFS= read -r -e -t "$TIMEOUT" edited_match || true
+            IFS= read -r -e -i "$prop_match_val" -t "$TIMEOUT" edited_match || true
             [ -z "$edited_match" ] && edited_match="$prop_match_val"
             prop_match_val="$edited_match"
           fi
