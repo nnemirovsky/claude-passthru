@@ -27,7 +27,7 @@ setup() {
   local cmd
   for cmd in jq perl bash cat sed awk printf tr sort uniq comm head tail \
              mkdir rm cp mv ln ls chmod date mktemp find grep wc tee touch \
-             dirname basename realpath readlink env sha256sum shasum; do
+             dirname basename realpath readlink env sha256sum shasum tput; do
     local src
     src="$(command -v "$cmd" 2>/dev/null || true)"
     if [ -n "$src" ] && [ -x "$src" ]; then

@@ -31,7 +31,7 @@ setup() {
   local cmd
   for cmd in jq perl bash cat sed awk printf tr sort uniq comm head tail \
              mkdir rm cp mv ln ls chmod date mktemp find grep wc tee touch \
-             dirname basename realpath readlink env sha256sum shasum; do
+             dirname basename realpath readlink env sha256sum shasum tput; do
     local src
     src="$(command -v "$cmd" 2>/dev/null || true)"
     if [ -n "$src" ] && [ -x "$src" ]; then
@@ -102,7 +102,7 @@ restricted_path() {
   grep -q 'display-popup' "$TMP/tmux.log"
   grep -q -- '-E' "$TMP/tmux.log"
   grep -q -- '-w 80%' "$TMP/tmux.log"
-  grep -q -- '-h 60%' "$TMP/tmux.log"
+  grep -qE -- '-h [0-9]+' "$TMP/tmux.log"
   # Dialog ran -> result file has the verdict.
   [ -f "$TMP/result.txt" ]
   run cat "$TMP/result.txt"
