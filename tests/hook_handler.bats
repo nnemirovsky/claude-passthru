@@ -847,10 +847,10 @@ STUB
     # Write verdict + optional rule JSON, then exit 0. The hook reads
     # \$PASSTHRU_OVERLAY_RESULT_FILE afterwards.
     local rule_literal=""
+    local scope_literal=""
     if [ -n "$rule_json" ]; then
-      # Pass the rule JSON through printf as a literal string (escape \$ so
-      # the stub itself does not try to expand it).
       rule_literal="printf '%s\\n' '$rule_json' >> \"\$PASSTHRU_OVERLAY_RESULT_FILE\""
+      scope_literal="printf '%s\\n' 'project' >> \"\$PASSTHRU_OVERLAY_RESULT_FILE\""
     fi
     cat > "$stub_overlay" <<STUB
 #!/usr/bin/env bash
@@ -858,6 +858,7 @@ STUB
 mkdir -p "\$(dirname "\$PASSTHRU_OVERLAY_RESULT_FILE")" 2>/dev/null || true
 printf '%s\\n' '${verdict}' > "\$PASSTHRU_OVERLAY_RESULT_FILE"
 ${rule_literal}
+${scope_literal}
 # Touch a log file so tests can assert the stub ran.
 if [ -n "\${PASSTHRU_OVERLAY_STUB_LOG:-}" ]; then
   {
@@ -1183,7 +1184,7 @@ EOF
   [[ "$reason" == *"overlay"* ]]
 }
 
-@test "overlay: yes_always verdict writes rule to user/allow AND emits allow" {
+@test "overlay: yes_always verdict writes rule to project/allow AND emits allow" {
   rule_json='{"tool":"Bash","match":{"command":"^gh "},"reason":"overlay yes_always"}'
   setup_overlay_stub "yes_always" 0 "$rule_json"
   export TMUX="mock/0"
@@ -1204,15 +1205,15 @@ EOF
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
   [ "$decision" = "allow" ]
-  # Rule landed in user-scope passthru.json under allow[].
-  [ -f "$USER_ROOT/.claude/passthru.json" ]
-  match_cmd="$(jq -r '.allow[-1].match.command' "$USER_ROOT/.claude/passthru.json")"
+  # Rule landed in project-scope passthru.json under allow[] (default scope).
+  [ -f "$PROJ_ROOT/.claude/passthru.json" ]
+  match_cmd="$(jq -r '.allow[-1].match.command' "$PROJ_ROOT/.claude/passthru.json")"
   [ "$match_cmd" = "^gh " ]
-  tool_val="$(jq -r '.allow[-1].tool' "$USER_ROOT/.claude/passthru.json")"
+  tool_val="$(jq -r '.allow[-1].tool' "$PROJ_ROOT/.claude/passthru.json")"
   [ "$tool_val" = "Bash" ]
 }
 
-@test "overlay: no_always verdict writes rule to user/deny AND emits deny" {
+@test "overlay: no_always verdict writes rule to project/deny AND emits deny" {
   rule_json='{"tool":"Bash","match":{"command":"^curl "},"reason":"overlay no_always"}'
   setup_overlay_stub "no_always" 0 "$rule_json"
   export TMUX="mock/0"
@@ -1233,8 +1234,8 @@ EOF
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
   [ "$decision" = "deny" ]
-  [ -f "$USER_ROOT/.claude/passthru.json" ]
-  match_cmd="$(jq -r '.deny[-1].match.command' "$USER_ROOT/.claude/passthru.json")"
+  [ -f "$PROJ_ROOT/.claude/passthru.json" ]
+  match_cmd="$(jq -r '.deny[-1].match.command' "$PROJ_ROOT/.claude/passthru.json")"
   [ "$match_cmd" = "^curl " ]
 }
 

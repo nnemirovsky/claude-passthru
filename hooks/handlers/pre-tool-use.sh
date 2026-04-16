@@ -635,6 +635,7 @@ RULE_JSON_LINE=""
 if [ -s "$OVERLAY_RESULT" ]; then
   VERDICT="$(head -n 1 "$OVERLAY_RESULT" 2>/dev/null || true)"
   RULE_JSON_LINE="$(sed -n '2p' "$OVERLAY_RESULT" 2>/dev/null || true)"
+  RULE_SCOPE_LINE="$(sed -n '3p' "$OVERLAY_RESULT" 2>/dev/null || true)"
 fi
 # Best-effort cleanup of the result file; harmless if the file is already
 # missing.
@@ -654,13 +655,15 @@ case "$VERDICT" in
     exit 0
     ;;
   yes_always|no_always)
-    # Persist the proposed rule via write-rule.sh. Scope is always user:
-    # overlay-dialog.sh does not expose a scope picker today, and the
-    # proposer never writes one. If a future overlay UX adds per-rule scope
-    # selection, add scope extraction here then.
+    # Persist the proposed rule via write-rule.sh. Scope comes from overlay
+    # dialog line 3 (project or user, defaults to project).
     target_list="allow"
     [ "$VERDICT" = "no_always" ] && target_list="deny"
-    target_scope="user"
+    target_scope="project"
+    case "$RULE_SCOPE_LINE" in
+      user) target_scope="user" ;;
+      project) target_scope="project" ;;
+    esac
     if [ -n "$RULE_JSON_LINE" ] && jq -e '.' >/dev/null 2>&1 <<<"$RULE_JSON_LINE"; then
       _rule_to_write="$RULE_JSON_LINE"
 
