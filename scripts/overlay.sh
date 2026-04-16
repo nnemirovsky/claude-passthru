@@ -119,16 +119,29 @@ fi
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
-# We pass the dialog context via env vars (not argv) to keep argv free of
-# untrusted tool_input content. The dialog inherits our environment, including
-# PASSTHRU_OVERLAY_TOOL_NAME, PASSTHRU_OVERLAY_TOOL_INPUT_JSON,
-# PASSTHRU_OVERLAY_RESULT_FILE, PASSTHRU_OVERLAY_TIMEOUT, and
-# PASSTHRU_OVERLAY_TEST_ANSWER.
+# Multiplexer popups (tmux display-popup, kitty @launch, wezterm cli
+# split-pane) start a fresh shell that does NOT inherit the caller's exported
+# env vars. We pass them through a temp env file that the popup sources before
+# exec-ing the dialog script. printf '%q' produces bash-safe quoting for
+# arbitrary strings (handles JSON with quotes, backslashes, etc.).
+
+_write_env_file() {
+  _ENV_FILE="$(mktemp)"
+  printf 'export PASSTHRU_OVERLAY_RESULT_FILE=%q\n' "$RESULT_FILE" >> "$_ENV_FILE"
+  printf 'export PASSTHRU_OVERLAY_TOOL_NAME=%q\n' "${PASSTHRU_OVERLAY_TOOL_NAME:-}" >> "$_ENV_FILE"
+  printf 'export PASSTHRU_OVERLAY_TOOL_INPUT_JSON=%q\n' "${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}" >> "$_ENV_FILE"
+  printf 'export PASSTHRU_OVERLAY_TIMEOUT=%q\n' "$TIMEOUT" >> "$_ENV_FILE"
+  if [ -n "${PASSTHRU_OVERLAY_TEST_ANSWER:-}" ]; then
+    printf 'export PASSTHRU_OVERLAY_TEST_ANSWER=%q\n' "$PASSTHRU_OVERLAY_TEST_ANSWER" >> "$_ENV_FILE"
+  fi
+}
+_write_env_file
 
 launch_tmux() {
   # display-popup -E: close when the inner command exits.
   # -w 80% -h 60%: large enough for the menu + rule preview, still overlay-y.
-  tmux display-popup -E -w 80% -h 60% -- bash "$DIALOG"
+  tmux display-popup -E -w 80% -h 60% -- \
+    bash -c ". '$_ENV_FILE' && rm -f '$_ENV_FILE' && exec bash '$DIALOG'"
 }
 
 launch_kitty() {
@@ -137,13 +150,15 @@ launch_kitty() {
   # kitty @ launch requires the remote-control socket ($KITTY_LISTEN_ON) or an
   # allow-remote-control config. We invoke unconditionally; failure surfaces as
   # exit 2 which the caller maps to "fall through to native dialog".
-  kitty @ launch --type=overlay --no-response bash "$DIALOG"
+  kitty @ launch --type=overlay --no-response \
+    bash -c ". '$_ENV_FILE' && rm -f '$_ENV_FILE' && exec bash '$DIALOG'"
 }
 
 launch_wezterm() {
   # split-pane creates an adjacent pane that dies when the inner command
   # exits. Good enough for a modal-ish prompt.
-  wezterm cli split-pane -- bash "$DIALOG"
+  wezterm cli split-pane -- \
+    bash -c ". '$_ENV_FILE' && rm -f '$_ENV_FILE' && exec bash '$DIALOG'"
 }
 
 case "$MUX" in
