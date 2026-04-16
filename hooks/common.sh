@@ -361,9 +361,9 @@ overlay_available() {
 #
 # Mode behavior:
 #   bypassPermissions: always 0 (everything auto-allowed).
-#   acceptEdits:      0 for Write/Edit/NotebookEdit/MultiEdit when the
-#                     target file_path resolves inside cwd. Non-edit tools
-#                     in acceptEdits return 1.
+#   acceptEdits:      superset of default. 0 for Write/Edit/NotebookEdit/
+#                     MultiEdit + Read/Grep/Glob/NotebookRead/LS when the
+#                     target path resolves inside cwd.
 #   default (+ empty mode value): 0 for read-only tools
 #                     (Read/Grep/Glob/NotebookRead/LS) when the target path
 #                     is inside cwd. Everything else returns 1, including
@@ -408,11 +408,32 @@ permission_mode_auto_allows() {
 
   case "$mode" in
     acceptEdits)
+      # acceptEdits is a superset of default: everything default auto-allows
+      # (Read/Grep/Glob/LS inside cwd) PLUS edit tools inside cwd.
       case "$tool_name" in
         Write|Edit|NotebookEdit|MultiEdit)
           local fp
           fp="$(jq -r '.file_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
           if _pm_path_inside_cwd "$fp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        Read|NotebookRead)
+          local fp
+          fp="$(jq -r '.file_path // .notebook_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          if _pm_path_inside_cwd "$fp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        Grep|Glob|LS)
+          local gp
+          gp="$(jq -r '.path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          if [ -z "$gp" ]; then
+            return 0
+          fi
+          if _pm_path_inside_cwd "$gp" "$cwd"; then
             return 0
           fi
           return 1

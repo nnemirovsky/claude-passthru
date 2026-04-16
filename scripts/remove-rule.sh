@@ -159,8 +159,19 @@ acquire_lock() {
   deadline=$(( $(date +%s) + LOCK_TIMEOUT ))
   while :; do
     if mkdir "$LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
       LOCK_HELD=1
       return 0
+    fi
+    # Stale lock detection: check if holder PID is still alive.
+    if [ -f "$LOCK_DIR/pid" ]; then
+      local holder_pid
+      holder_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+      if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+        rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+        continue
+      fi
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
       return 1
@@ -171,6 +182,7 @@ acquire_lock() {
 
 release_lock() {
   if [ "$LOCK_HELD" -eq 1 ]; then
+    rm -f "$LOCK_DIR/pid" 2>/dev/null || true
     rmdir "$LOCK_DIR" 2>/dev/null || true
     LOCK_HELD=0
   fi

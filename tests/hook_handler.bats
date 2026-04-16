@@ -939,32 +939,33 @@ run_handler_in_stub_root() {
   [ "$decision" = "allow" ]
 }
 
-@test "mode: acceptEdits + Write OUTSIDE cwd -> overlay path entered" {
-  # file_path is /tmp/elsewhere (definitely not under PROJ_ROOT). Mode does
-  # NOT auto-allow, so we fall through to overlay. Stub emits yes_once.
-  setup_overlay_stub "yes_once"
+@test "mode: acceptEdits + Write OUTSIDE cwd -> native dialog (diff rendering)" {
+  # Write outside cwd is not mode-auto-allowed. Write tools fall through to
+  # CC's native dialog (permissionDecision: ask) for diff rendering instead
+  # of the overlay.
   ti='{"file_path":"/tmp/elsewhere/foo.ts","content":"x"}'
   payload="$(make_mode_payload 'Write' "$ti" 'acceptEdits' "$PROJ_ROOT")"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
-  [ "$decision" = "allow" ]
+  [ "$decision" = "ask" ]
 }
 
-@test "mode: acceptEdits + Read (non-edit tool) -> overlay path entered" {
-  # Read is NOT in the acceptEdits allow-list; acceptEdits only covers
-  # Write/Edit/NotebookEdit/MultiEdit. A Read call falls through to overlay.
-  setup_overlay_stub "yes_once"
+@test "mode: acceptEdits + Read inside cwd -> mode auto-allow (superset of default)" {
+  # acceptEdits is a superset of default: it auto-allows everything default
+  # does (Read/Grep/Glob inside cwd) PLUS edit tools inside cwd.
   ti="$(jq -cn --arg fp "$PROJ_ROOT/src/foo.ts" '{file_path:$fp}')"
   payload="$(make_mode_payload 'Read' "$ti" 'acceptEdits' "$PROJ_ROOT")"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
   [ "$decision" = "allow" ]
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$json_line")"
+  [[ "$reason" == *"mode-allow"* ]]
 }
 
 # default mode: all tools go to overlay ----------------------------------------
@@ -1021,17 +1022,17 @@ run_handler_in_stub_root() {
   [ "$decision" = "allow" ]
 }
 
-@test "mode: plan + Write -> overlay path entered" {
-  # plan mode restricts writes; the overlay (or native fallback) gates them.
-  setup_overlay_stub "no_once"
+@test "mode: plan + Write -> native dialog (diff rendering)" {
+  # plan mode restricts writes. Write tools fall through to native dialog
+  # for diff rendering rather than the overlay.
   ti="$(jq -cn --arg fp "$PROJ_ROOT/src/foo.ts" '{file_path:$fp,content:"x"}')"
   payload="$(make_mode_payload 'Write' "$ti" 'plan' "$PROJ_ROOT")"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
-  [ "$decision" = "deny" ]
+  [ "$decision" = "ask" ]
 }
 
 # WebFetch and WebSearch go through the overlay --------------------------------
@@ -1063,21 +1064,17 @@ run_handler_in_stub_root() {
 
 # Path-traversal safety ------------------------------------------------------
 
-@test "mode: acceptEdits + file_path with ../ traversal is NOT auto-allowed" {
-  # $PROJ_ROOT/../outside literally starts with $PROJ_ROOT/ but resolves
-  # OUTSIDE cwd. permission_mode_auto_allows must reject these so crafted
-  # tool_inputs cannot sneak past the prefix check.
-  setup_overlay_stub "no_once"
+@test "mode: acceptEdits + file_path with ../ traversal -> native dialog (not auto-allowed)" {
+  # Write with ../ traversal is not mode-auto-allowed. Write tools fall
+  # through to native dialog for diff rendering.
   ti="$(jq -cn --arg fp "$PROJ_ROOT/../outside/secret.txt" '{file_path:$fp,content:"x"}')"
   payload="$(make_mode_payload 'Write' "$ti" 'acceptEdits' "$PROJ_ROOT")"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
   [ -n "$json_line" ]
-  # Decision came from overlay (stub returned no_once). Auto-allow was
-  # rejected -> overlay was consulted -> deny.
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
-  [ "$decision" = "deny" ]
+  [ "$decision" = "ask" ]
 }
 
 @test "mode: symlink inside cwd -> overlay path entered (no auto-allow shortcut)" {
@@ -1405,20 +1402,19 @@ EOF
   [ "$output" = "overlay" ]
 }
 
-@test "audit: bypassPermissions mode logs source=overlay (no mode auto-allow)" {
-  # Mode-based auto-allow is removed. bypassPermissions goes through the
-  # overlay like every other mode and is logged with source=overlay.
+@test "audit: bypassPermissions mode logs source=passthru-mode (mode auto-allow)" {
+  # bypassPermissions auto-allows everything. Passthru emits allow with
+  # source=passthru-mode, keeping the decision on our side.
   enable_audit
-  setup_overlay_stub "yes_once"
   ti='{"command":"ls"}'
   payload="$(jq -cn --arg t 'Bash' --argjson ti "$ti" --arg m 'bypassPermissions' --arg c "$PROJ_ROOT" \
     '{tool_name:$t,tool_input:$ti,permission_mode:$m,cwd:$c,tool_use_id:"tMODE"}')"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   [ -f "$(audit_log)" ]
   line="$(head -n1 "$(audit_log)")"
   run jq -r '.source' <<<"$line"
-  [ "$output" = "overlay" ]
+  [ "$output" = "passthru-mode" ]
   run jq -r '.event' <<<"$line"
   [ "$output" = "allow" ]
 }

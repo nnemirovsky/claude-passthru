@@ -99,15 +99,14 @@ setup() {
   [[ "$output" == *'pre-tool-use.sh' ]]
 }
 
-@test "hooks/hooks.json PreToolUse timeout is 75 (overlay + margin)" {
-  # Task 8 bumped the PreToolUse timeout from 10s to 75s because the hook
-  # may block synchronously while the overlay dialog waits for user input.
-  # The overlay's own timeout is 60s, so 75s leaves 15s of margin for
-  # overlay.sh startup + post-dialog rule write. CC's hook timeout is
-  # wall-clock, so anything < 60s would kill the hook mid-dialog.
+@test "hooks/hooks.json PreToolUse timeout is 300 (overlay interactive budget)" {
+  # The hook blocks while the overlay dialog waits for user input. The user
+  # may navigate menus, review rules, and edit regex fields. 300s (5 min)
+  # gives generous interactive time. The overlay's per-read timeout (60s)
+  # provides the inner limit.
   run jq -r '.hooks.PreToolUse[0].hooks[0].timeout' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]
-  [ "$output" = "75" ]
+  [ "$output" = "300" ]
 }
 
 @test "hooks/hooks.json has exactly one PostToolUse entry" {

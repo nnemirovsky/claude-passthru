@@ -131,23 +131,34 @@ _write_env_file() {
   printf 'export PASSTHRU_OVERLAY_TOOL_NAME=%q\n' "${PASSTHRU_OVERLAY_TOOL_NAME:-}" >> "$_ENV_FILE"
   printf 'export PASSTHRU_OVERLAY_TOOL_INPUT_JSON=%q\n' "${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}" >> "$_ENV_FILE"
   printf 'export PASSTHRU_OVERLAY_TIMEOUT=%q\n' "$TIMEOUT" >> "$_ENV_FILE"
+  printf 'export PASSTHRU_OVERLAY_CWD=%q\n' "${PASSTHRU_OVERLAY_CWD:-${PWD}}" >> "$_ENV_FILE"
   if [ -n "${PASSTHRU_OVERLAY_TEST_ANSWER:-}" ]; then
     printf 'export PASSTHRU_OVERLAY_TEST_ANSWER=%q\n' "$PASSTHRU_OVERLAY_TEST_ANSWER" >> "$_ENV_FILE"
   fi
 }
 _write_env_file
 
-# Compute popup height dynamically based on content.
-_term_cols="$(tput cols 2>/dev/null || echo 120)"
-_popup_cols=$(( _term_cols * 80 / 100 ))
-[ "$_popup_cols" -lt 40 ] && _popup_cols=40
-_input_str="${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}"
-_input_len="${#_input_str}"
-if [ "$_input_len" -gt 120 ]; then _input_len=120; fi
-_input_lines=$(( (_input_len + 7) / (_popup_cols - 8) + 1 ))
-[ "$_input_lines" -lt 1 ] && _input_lines=1
-_popup_height=$(( 12 + _input_lines ))
-[ "$_popup_height" -lt 13 ] && _popup_height=13
+# Compute popup height dynamically based on content and tool type.
+# Base: title(1) + blank(1) + tool(1) + input(varies) + blank(1) +
+#       5 menu(5) + blank(1) + hint(1) + cursor(1) = 12 + input_lines
+_tool="${PASSTHRU_OVERLAY_TOOL_NAME:-}"
+_input="${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}"
+_extra=0
+case "$_tool" in
+  NotebookEdit)
+    # file_path + cell info = 2 lines
+    _extra=1 ;;
+  Grep|Glob)
+    # pattern + path = 2 lines
+    _extra=1 ;;
+  mcp__*)
+    # pretty-printed JSON: estimate lines from key count, cap at 8
+    _jlines="$(jq 'length' <<<"$_input" 2>/dev/null || echo 1)"
+    [ "$_jlines" -gt 10 ] && _jlines=10
+    _extra=$((_jlines)) ;;
+esac
+# +2 for cwd line + optional window/session line in header
+_popup_height=$((15 + _extra))
 [ "$_popup_height" -gt 30 ] && _popup_height=30
 
 launch_tmux() {
