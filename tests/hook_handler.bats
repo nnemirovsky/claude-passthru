@@ -953,18 +953,19 @@ run_handler_in_stub_root() {
   [ "$decision" = "ask" ]
 }
 
-@test "mode: acceptEdits + Read (non-edit tool) -> overlay path entered" {
-  # Read is NOT in the acceptEdits allow-list; acceptEdits only covers
-  # Write/Edit/NotebookEdit/MultiEdit. A Read call falls through to overlay.
-  setup_overlay_stub "yes_once"
+@test "mode: acceptEdits + Read inside cwd -> mode auto-allow (superset of default)" {
+  # acceptEdits is a superset of default: it auto-allows everything default
+  # does (Read/Grep/Glob inside cwd) PLUS edit tools inside cwd.
   ti="$(jq -cn --arg fp "$PROJ_ROOT/src/foo.ts" '{file_path:$fp}')"
   payload="$(make_mode_payload 'Read' "$ti" 'acceptEdits' "$PROJ_ROOT")"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
   [ "$decision" = "allow" ]
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$json_line")"
+  [[ "$reason" == *"mode-allow"* ]]
 }
 
 # default mode: all tools go to overlay ----------------------------------------
