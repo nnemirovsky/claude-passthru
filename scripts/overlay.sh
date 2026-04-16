@@ -131,6 +131,7 @@ _write_env_file() {
   printf 'export PASSTHRU_OVERLAY_TOOL_NAME=%q\n' "${PASSTHRU_OVERLAY_TOOL_NAME:-}" >> "$_ENV_FILE"
   printf 'export PASSTHRU_OVERLAY_TOOL_INPUT_JSON=%q\n' "${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}" >> "$_ENV_FILE"
   printf 'export PASSTHRU_OVERLAY_TIMEOUT=%q\n' "$TIMEOUT" >> "$_ENV_FILE"
+  printf 'export PASSTHRU_OVERLAY_CWD=%q\n' "${PASSTHRU_OVERLAY_CWD:-${PWD}}" >> "$_ENV_FILE"
   if [ -n "${PASSTHRU_OVERLAY_TEST_ANSWER:-}" ]; then
     printf 'export PASSTHRU_OVERLAY_TEST_ANSWER=%q\n' "$PASSTHRU_OVERLAY_TEST_ANSWER" >> "$_ENV_FILE"
   fi
@@ -156,7 +157,8 @@ case "$_tool" in
     [ "$_jlines" -gt 10 ] && _jlines=10
     _extra=$((_jlines)) ;;
 esac
-_popup_height=$((13 + _extra))
+# +2 for cwd line + optional window/session line in header
+_popup_height=$((15 + _extra))
 [ "$_popup_height" -gt 30 ] && _popup_height=30
 
 launch_tmux() {

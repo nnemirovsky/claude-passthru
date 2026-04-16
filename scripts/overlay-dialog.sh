@@ -54,6 +54,7 @@ TOOL_NAME="${PASSTHRU_OVERLAY_TOOL_NAME:-}"
 TOOL_INPUT_JSON="${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}"
 RESULT_FILE="${PASSTHRU_OVERLAY_RESULT_FILE:-}"
 TIMEOUT="${PASSTHRU_OVERLAY_TIMEOUT:-60}"
+OVERLAY_CWD="${PASSTHRU_OVERLAY_CWD:-${PWD}}"
 TEST_ANSWER="${PASSTHRU_OVERLAY_TEST_ANSWER:-}"
 
 # Without a result file path we have nowhere to write. Bail silently (caller
@@ -272,9 +273,34 @@ if [ "${#preview_lines[@]}" -eq 0 ]; then
   preview_lines+=("$(_truncate "$TOOL_INPUT_JSON" 120)")
 fi
 
+# Session context for the header (helps distinguish multiple CC sessions).
+_display_cwd="$OVERLAY_CWD"
+case "$_display_cwd" in
+  "$HOME"/*) _display_cwd="~${_display_cwd#"$HOME"}" ;;
+  "$HOME")   _display_cwd="~" ;;
+esac
+# Session label: prefer CC session name (CLAUDE_SESSION_NAME) if set,
+# fall back to tmux window name, then omit.
+_session_label=""
+if [ -n "${CLAUDE_SESSION_NAME:-}" ]; then
+  _session_label="$CLAUDE_SESSION_NAME"
+elif [ -n "${TMUX:-}" ]; then
+  _w="$(tmux display-message -p '#W' 2>/dev/null || true)"
+  [ -n "$_w" ] && _session_label="$_w"
+fi
+
+_render_header() {
+  printf "${BOLD}Passthru Permission Prompt${RESET}\n"
+  printf "\033[2mcwd: %s\033[0m\n" "$_display_cwd"
+  if [ -n "$_session_label" ]; then
+    printf "\033[2msession: %s\033[0m\n" "$_session_label"
+  fi
+  printf '\n'
+}
+
 render_main_menu() {
   printf '\033[H\033[2J'
-  printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
+  _render_header
   printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
   # Render preview lines.
   local first=1
@@ -375,7 +401,7 @@ prop_match_val="$(jq -r '.match // empty | to_entries[0].value // empty' <<<"$pr
 
 render_rule_editor() {
   printf '\033[H\033[2J'
-  printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
+  _render_header "$_display_cwd"
   printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
   local _first=1
   for _pl in "${preview_lines[@]}"; do

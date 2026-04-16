@@ -608,6 +608,7 @@ fi
 export PASSTHRU_OVERLAY_RESULT_FILE="$OVERLAY_RESULT"
 export PASSTHRU_OVERLAY_TOOL_NAME="$TOOL_NAME"
 export PASSTHRU_OVERLAY_TOOL_INPUT_JSON="$TOOL_INPUT"
+export PASSTHRU_OVERLAY_CWD="$CC_CWD"
 
 # Invoke the overlay and capture its exit code. We have an ERR trap in place
 # (converts unexpected errors to fail-open passthrough), so we cannot rely on
