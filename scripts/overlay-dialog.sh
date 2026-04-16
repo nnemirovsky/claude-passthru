@@ -274,10 +274,13 @@ if [ "${#preview_lines[@]}" -eq 0 ]; then
 fi
 
 # Session context for the header (helps distinguish multiple CC sessions).
-_display_cwd="$OVERLAY_CWD"
+_display_cwd="${OVERLAY_CWD:-${PWD:-}}"
+if [ -z "$_display_cwd" ]; then
+  _display_cwd="$(pwd 2>/dev/null || true)"
+fi
 case "$_display_cwd" in
-  "$HOME"/*) _display_cwd="~${_display_cwd#"$HOME"}" ;;
-  "$HOME")   _display_cwd="~" ;;
+  "${HOME:-/nonexistent}"/*) _display_cwd="~${_display_cwd#"${HOME}"}" ;;
+  "${HOME:-/nonexistent}")   _display_cwd="~" ;;
 esac
 # Session label: multiplexer window/tab name if available.
 _session_label=""
@@ -290,12 +293,23 @@ elif [ -n "${WEZTERM_PANE:-}" ]; then
 fi
 
 _render_header() {
-  printf "${BOLD}Passthru Permission Prompt${RESET}\n"
-  printf "\033[2mcwd: %s\033[0m\n" "$_display_cwd"
-  if [ -n "$_session_label" ]; then
-    printf "\033[2msession: %s\033[0m\n" "$_session_label"
+  # cwd on top right, session below if available. No empty lines.
+  local _ctx=""
+  if [ -n "$_display_cwd" ]; then
+    _ctx="$_display_cwd"
   fi
-  printf '\n'
+  if [ -n "$_session_label" ] && [ "$_session_label" != "$_display_cwd" ]; then
+    if [ -n "$_ctx" ]; then
+      _ctx="${_ctx} | ${_session_label}"
+    else
+      _ctx="$_session_label"
+    fi
+  fi
+  if [ -n "$_ctx" ]; then
+    printf "${BOLD}Passthru Permission Prompt${RESET}  \033[2m%s\033[0m\n\n" "$_ctx"
+  else
+    printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
+  fi
 }
 
 render_main_menu() {
