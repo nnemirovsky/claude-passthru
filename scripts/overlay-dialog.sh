@@ -2,9 +2,10 @@
 # claude-passthru overlay dialog (TUI body).
 #
 # Runs INSIDE the popup spawned by scripts/overlay.sh. Reads tool_name and
-# tool_input (as compact JSON) from env vars, renders a Y/A/N/D/Esc menu,
-# optionally walks the user through a "accept or edit" regex proposal on the
-# always-variants, and writes its verdict to $PASSTHRU_OVERLAY_RESULT_FILE.
+# tool_input (as compact JSON) from env vars, renders a Y/A/N/D/Esc menu
+# with arrow-key navigation, optionally walks the user through a "accept or
+# edit" regex proposal on the always-variants, and writes its verdict to
+# $PASSTHRU_OVERLAY_RESULT_FILE.
 #
 # Env contract (exported by overlay.sh / caller):
 #   PASSTHRU_OVERLAY_TOOL_NAME          the tool being gated.
@@ -92,40 +93,56 @@ propose_rule() {
   printf '%s' "$proposed"
 }
 
-render_menu() {
-  # Best-effort preview. Truncate tool_input display for sanity.
-  local preview=""
-  if [ -n "$TOOL_INPUT_JSON" ]; then
-    preview="$TOOL_INPUT_JSON"
-    # Max display width for tool_input in the overlay menu.
-    local max_preview=120
-    local truncated_len=$((max_preview - 3))  # room for "..."
-    if [ "${#preview}" -gt "$max_preview" ]; then
-      preview="${preview:0:$truncated_len}..."
-    fi
+# ANSI helpers.
+BOLD='\033[1m'
+DIM='\033[2m'
+REVERSE='\033[7m'
+GREEN='\033[32m'
+RED='\033[31m'
+CYAN='\033[36m'
+RESET='\033[0m'
+
+# read_key: read a single keypress (handling multi-byte arrow sequences).
+# Sets KEY to one of: up, down, enter, esc, y, a, n, d, e, or "other".
+read_key() {
+  KEY=""
+  local byte=""
+  if ! IFS= read -r -s -n 1 -t "$TIMEOUT" byte; then
+    KEY="timeout"
+    return
   fi
-  cat <<MENU
-Passthru Permission Prompt
-
-Tool:  ${TOOL_NAME:-(unknown)}
-Input: ${preview}
-
-[Y] Yes, once
-[A] Yes, always (with custom rule)
-[N] No, once
-[D] No, always (deny rule)
-[Esc] Skip (use native dialog)
-MENU
+  case "$byte" in
+    $'\e')
+      # Escape: could be plain Esc or start of arrow/function sequence.
+      local seq1=""
+      if IFS= read -r -s -n 1 -t 0.1 seq1; then
+        if [ "$seq1" = "[" ]; then
+          local seq2=""
+          if IFS= read -r -s -n 1 -t 0.1 seq2; then
+            case "$seq2" in
+              A) KEY="up"; return ;;
+              B) KEY="down"; return ;;
+              *) KEY="other"; return ;;
+            esac
+          fi
+        fi
+        KEY="other"
+      else
+        KEY="esc"
+      fi
+      ;;
+    ""|$'\n')
+      KEY="enter"
+      ;;
+    *)
+      KEY="$(printf '%s' "$byte" | tr '[:upper:]' '[:lower:]')"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
 # Test short-circuit path
 # ---------------------------------------------------------------------------
-# Bats cannot realistically drive an interactive popup. PASSTHRU_OVERLAY_TEST_ANSWER
-# bypasses the render + read loop and acts on the answer directly. This is the
-# only way the overlay flow is exercised in the test suite; production invocations
-# leave the var unset and hit the interactive path below.
-
 if [ -n "$TEST_ANSWER" ]; then
   case "$TEST_ANSWER" in
     yes_once)
@@ -143,11 +160,9 @@ if [ -n "$TEST_ANSWER" ]; then
       write_verdict_always "no_always" "$proposed"
       ;;
     cancel)
-      # Deliberately do NOT write. Caller treats missing file as cancel.
       :
       ;;
     *)
-      # Unknown value. Treat as cancel.
       :
       ;;
   esac
@@ -155,109 +170,230 @@ if [ -n "$TEST_ANSWER" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Interactive path
+# Interactive path: main menu
 # ---------------------------------------------------------------------------
-# Pure-bash keypress loop. No dependency on whiptail/dialog. Single keystroke
-# read with a timeout; Esc / Ctrl-C / timeout all fall through to the
-# "do not write, let caller treat as cancel" branch.
 
-render_menu
+MENU_LABELS=("[Y] Yes, once" "[A] Yes, always (with custom rule)" "[N] No, once" "[D] No, always (deny rule)" "[Esc] Skip (use native dialog)")
+MENU_KEYS=(y a n d esc)
+MENU_COUNT=${#MENU_LABELS[@]}
+selected=0
 
-answer=""
-# `read -r -s -n 1` captures a single keystroke without echo. -t gives timeout.
-if ! IFS= read -r -s -n 1 -t "$TIMEOUT" key; then
-  # Timeout or read error. Fall through as cancel.
-  exit 0
+# Build a human-readable preview from tool_input. Extract the most relevant
+# field per tool type instead of showing raw JSON.
+preview=""
+if [ -n "$TOOL_INPUT_JSON" ]; then
+  _extract() { jq -r --arg f "$1" '.[$f] // empty' <<<"$TOOL_INPUT_JSON" 2>/dev/null; }
+  case "$TOOL_NAME" in
+    Bash)
+      preview="$(_extract command)" ;;
+    WebFetch|WebSearch)
+      preview="$(_extract url)"
+      [ -z "$preview" ] && preview="$(_extract query)" ;;
+    Read|Edit|Write|NotebookEdit|NotebookRead)
+      preview="$(_extract file_path)" ;;
+    Grep)
+      preview="$(_extract pattern)"
+      _path="$(_extract path)"
+      [ -n "$_path" ] && preview="${preview}  (in ${_path})" ;;
+    Glob)
+      preview="$(_extract pattern)"
+      _path="$(_extract path)"
+      [ -n "$_path" ] && preview="${preview}  (in ${_path})" ;;
+    Agent)
+      preview="$(_extract description)"
+      [ -z "$preview" ] && preview="$(_extract prompt | head -c 120)" ;;
+    *)
+      preview="$TOOL_INPUT_JSON" ;;
+  esac
+  # Fallback to raw JSON if extraction yielded nothing.
+  [ -z "$preview" ] && preview="$TOOL_INPUT_JSON"
+  max_preview=120
+  truncated_len=$((max_preview - 3))
+  if [ "${#preview}" -gt "$max_preview" ]; then
+    preview="${preview:0:$truncated_len}..."
+  fi
 fi
 
-# Normalize to lowercase for comparison.
-key_lc="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+render_main_menu() {
+  # Move cursor to top-left and clear screen.
+  printf '\033[H\033[2J'
+  printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
+  printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
+  printf "Input: ${DIM}%s${RESET}\n\n" "$preview"
 
-case "$key_lc" in
-  y)
-    answer="yes_once"
-    ;;
-  a)
-    answer="yes_always"
-    ;;
-  n)
-    answer="no_once"
-    ;;
-  d)
-    answer="no_always"
-    ;;
-  $'\e'|"")
-    # Esc (or empty result -> cancel).
-    exit 0
-    ;;
-  *)
-    # Unrecognized key: treat as cancel.
-    exit 0
-    ;;
-esac
+  local i
+  for ((i = 0; i < MENU_COUNT; i++)); do
+    if [ "$i" -eq "$selected" ]; then
+      printf "  ${REVERSE} %s ${RESET}\n" "${MENU_LABELS[$i]}"
+    else
+      printf "   %s\n" "${MENU_LABELS[$i]}"
+    fi
+  done
+  printf "\n${DIM}Use arrow keys or press a letter key${RESET}\n"
+}
 
-# Once-variants: write and done.
-case "$answer" in
-  yes_once|no_once)
-    write_verdict_once "$answer"
-    exit 0
-    ;;
-esac
+render_main_menu
 
-# Always-variants: show the proposed regex, allow edit-before-write.
+while true; do
+  read_key
+
+  case "$KEY" in
+    up)
+      if [ "$selected" -gt 0 ]; then
+        selected=$((selected - 1))
+      else
+        selected=$((MENU_COUNT - 1))
+      fi
+      render_main_menu
+      ;;
+    down)
+      if [ "$selected" -lt $((MENU_COUNT - 1)) ]; then
+        selected=$((selected + 1))
+      else
+        selected=0
+      fi
+      render_main_menu
+      ;;
+    enter)
+      # Confirm the current selection.
+      case "${MENU_KEYS[$selected]}" in
+        y)  write_verdict_once "yes_once"; exit 0 ;;
+        a)  break ;;  # fall through to always-confirm flow
+        n)  write_verdict_once "no_once"; exit 0 ;;
+        d)  break ;;  # fall through to always-confirm flow
+        esc) exit 0 ;;
+      esac
+      ;;
+    y)
+      write_verdict_once "yes_once"
+      exit 0
+      ;;
+    a)
+      selected=1  # yes_always
+      break
+      ;;
+    n)
+      write_verdict_once "no_once"
+      exit 0
+      ;;
+    d)
+      selected=3  # no_always
+      break
+      ;;
+    esc|timeout)
+      exit 0
+      ;;
+    *)
+      # Unknown key: ignore, keep looping.
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Always-variant: confirm/edit proposed rule
+# ---------------------------------------------------------------------------
+
+if [ "${MENU_KEYS[$selected]}" = "a" ]; then
+  answer="yes_always"
+else
+  answer="no_always"
+fi
+
 proposed="$(propose_rule)"
 
-cat <<RULE
+CONFIRM_LABELS=("[Enter] Accept rule" "[E] Edit rule JSON" "[Esc] Back to menu")
+CONFIRM_KEYS=(enter e esc)
+CONFIRM_COUNT=${#CONFIRM_LABELS[@]}
+confirm_sel=0
 
-Suggested rule:
-  ${proposed}
+render_confirm_menu() {
+  printf '\033[H\033[2J'
+  printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
+  printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
+  printf "Input: ${DIM}%s${RESET}\n\n" "$preview"
+  printf "Suggested rule:\n"
+  printf "  ${GREEN}%s${RESET}\n\n" "$proposed"
 
-[Enter] Accept
-[E] Edit
-[Esc] Back
-RULE
+  local i
+  for ((i = 0; i < CONFIRM_COUNT; i++)); do
+    if [ "$i" -eq "$confirm_sel" ]; then
+      printf "  ${REVERSE} %s ${RESET}\n" "${CONFIRM_LABELS[$i]}"
+    else
+      printf "   %s\n" "${CONFIRM_LABELS[$i]}"
+    fi
+  done
+  printf "\n${DIM}Use arrow keys or press a letter key${RESET}\n"
+}
 
-# Confirm-or-edit loop.
-confirm_key=""
-if ! IFS= read -r -s -n 1 -t "$TIMEOUT" confirm_key; then
+render_confirm_menu
+
+while true; do
+  read_key
+
+  case "$KEY" in
+    up)
+      if [ "$confirm_sel" -gt 0 ]; then
+        confirm_sel=$((confirm_sel - 1))
+      else
+        confirm_sel=$((CONFIRM_COUNT - 1))
+      fi
+      render_confirm_menu
+      ;;
+    down)
+      if [ "$confirm_sel" -lt $((CONFIRM_COUNT - 1)) ]; then
+        confirm_sel=$((confirm_sel + 1))
+      else
+        confirm_sel=0
+      fi
+      render_confirm_menu
+      ;;
+    enter)
+      case "${CONFIRM_KEYS[$confirm_sel]}" in
+        enter)
+          write_verdict_always "$answer" "$proposed"
+          exit 0
+          ;;
+        e)
+          # Edit path below.
+          break
+          ;;
+        esc)
+          # Back to main menu. Re-run entire script via exec for simplicity.
+          exec bash "$0"
+          ;;
+      esac
+      ;;
+    e)
+      break  # fall through to edit
+      ;;
+    esc|timeout)
+      # Back to main menu.
+      exec bash "$0"
+      ;;
+    *)
+      # Unknown key: ignore.
+      ;;
+  esac
+done
+
+# Edit path: read a full line with readline.
+printf '\033[H\033[2J'
+printf "${BOLD}Edit Rule JSON${RESET}\n\n"
+printf "Current:\n  ${GREEN}%s${RESET}\n\n" "$proposed"
+printf "Type new JSON (leave blank to accept):\n"
+edited=""
+if ! IFS= read -r -e -t "$TIMEOUT" edited; then
   exit 0
 fi
-confirm_lc="$(printf '%s' "$confirm_key" | tr '[:upper:]' '[:lower:]')"
-
-case "$confirm_lc" in
-  ""|$'\n')
-    # Enter: accept.
-    write_verdict_always "$answer" "$proposed"
-    ;;
-  e)
-    # Edit path. Read a full line with -e so readline handles cursor motion.
-    # Validate edited JSON before committing; invalid input falls back to
-    # the proposed rule so the user is not silently downgraded.
-    printf 'Edit rule JSON (leave blank to accept): '
-    edited=""
-    if ! IFS= read -r -e -t "$TIMEOUT" edited; then
-      exit 0
-    fi
-    if [ -z "$edited" ]; then
-      write_verdict_always "$answer" "$proposed"
-    elif jq -e 'type == "object"' >/dev/null 2>&1 <<<"$edited"; then
-      # Require a JSON object specifically. Bare strings/numbers/arrays are
-      # valid JSON but not valid rule shapes, and write-rule.sh would reject
-      # them with a less helpful error.
-      write_verdict_always "$answer" "$edited"
-    else
-      printf 'Invalid JSON (must be an object); falling back to suggested rule:\n  %s\n' "$proposed"
-      write_verdict_always "$answer" "$proposed"
-    fi
-    ;;
-  $'\e')
-    # Back / cancel.
-    exit 0
-    ;;
-  *)
-    # Any other key -> treat as cancel.
-    exit 0
-    ;;
-esac
+if [ -z "$edited" ]; then
+  write_verdict_always "$answer" "$proposed"
+elif jq -e 'type == "object"' >/dev/null 2>&1 <<<"$edited"; then
+  write_verdict_always "$answer" "$edited"
+else
+  printf '\n${RED}Invalid JSON (must be an object)${RESET}\n'
+  printf 'Using suggested rule: %s\n' "$proposed"
+  sleep 2
+  write_verdict_always "$answer" "$proposed"
+fi
 
 exit 0
