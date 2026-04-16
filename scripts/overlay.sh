@@ -137,10 +137,23 @@ _write_env_file() {
 }
 _write_env_file
 
+# Compute popup height dynamically based on content.
+_term_cols="$(tput cols 2>/dev/null || echo 120)"
+_popup_cols=$(( _term_cols * 80 / 100 ))
+[ "$_popup_cols" -lt 40 ] && _popup_cols=40
+_input_str="${PASSTHRU_OVERLAY_TOOL_INPUT_JSON:-}"
+_input_len="${#_input_str}"
+if [ "$_input_len" -gt 120 ]; then _input_len=120; fi
+_input_lines=$(( (_input_len + 7) / (_popup_cols - 8) + 1 ))
+[ "$_input_lines" -lt 1 ] && _input_lines=1
+_popup_height=$(( 12 + _input_lines ))
+[ "$_popup_height" -lt 13 ] && _popup_height=13
+[ "$_popup_height" -gt 30 ] && _popup_height=30
+
 launch_tmux() {
   # display-popup -E: close when the inner command exits.
   # -w 80% -h 60%: large enough for the menu + rule preview, still overlay-y.
-  tmux display-popup -E -w 80% -h 60% -- \
+  tmux display-popup -E -w 80% -h "$_popup_height" -- \
     bash -c ". '$_ENV_FILE' && rm -f '$_ENV_FILE' && exec bash '$DIALOG'"
 }
 

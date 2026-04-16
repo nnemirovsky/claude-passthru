@@ -95,7 +95,7 @@ propose_rule() {
 
 # ANSI helpers.
 BOLD='\033[1m'
-DIM='\033[2m'
+DIM='\033[34m'
 REVERSE='\033[7m'
 GREEN='\033[32m'
 RED='\033[31m'
@@ -229,7 +229,7 @@ render_main_menu() {
       printf "   %s\n" "${MENU_LABELS[$i]}"
     fi
   done
-  printf "\n${DIM}Use arrow keys or press a letter key${RESET}\n"
+  printf "\n\033[2mUse arrow keys or press a letter key\033[0m\n"
 }
 
 render_main_menu
@@ -322,7 +322,7 @@ render_confirm_menu() {
       printf "   %s\n" "${CONFIRM_LABELS[$i]}"
     fi
   done
-  printf "\n${DIM}Use arrow keys or press a letter key${RESET}\n"
+  printf "\n\033[2mUse arrow keys or press a letter key\033[0m\n"
 }
 
 render_confirm_menu
