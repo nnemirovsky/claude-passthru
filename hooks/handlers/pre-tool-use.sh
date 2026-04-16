@@ -33,6 +33,7 @@
 
 set -euo pipefail
 
+
 # ---------------------------------------------------------------------------
 # Locate and source common.sh
 # ---------------------------------------------------------------------------
@@ -481,22 +482,27 @@ if [ "$ORDERED_COUNT" -gt 0 ]; then
   done
 fi
 
-# --- 7. Mode-based auto-allow shortcut -------------------------------------
-# Only consult the permission-mode fast path if no ask[] rule matched. An
-# ask-rule always wins over mode-based auto-allow because the user declared
-# an explicit "prompt me on this" intent.
+# --- 7. Internal tool pass-through -----------------------------------------
+# Some tools are Claude Code internals (schema loading, task management, etc.)
+# that should never trigger the overlay. Pass them through unconditionally.
 if [ "$MATCHED" != "ask" ]; then
-  if permission_mode_auto_allows "$PERMISSION_MODE" "$TOOL_NAME" "$TOOL_INPUT" "$CC_CWD" 2>/dev/null; then
-    # CC itself would auto-allow this call. Emit passthrough and record
-    # the decision under source="passthru-mode" so the audit log can
-    # distinguish mode-driven allow from rule-driven allow.
-    audit_write_line "passthrough" "$TOOL_NAME" "mode:${PERMISSION_MODE:-default}" "" "" "$TOOL_USE_ID" "passthru-mode"
-    emit_passthrough
-    exit 0
-  fi
+  case "$TOOL_NAME" in
+    ToolSearch|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|\
+    AskUserQuestion|SendMessage|EnterPlanMode|ExitPlanMode|ScheduleWakeup|\
+    CronCreate|CronDelete|CronList|Monitor|LSP|RemoteTrigger|\
+    EnterWorktree|ExitWorktree|TeamCreate|TeamDelete)
+      emit_passthrough
+      exit 0
+      ;;
+  esac
 fi
 
 # --- 8. Overlay path -------------------------------------------------------
+# Passthru handles ALL non-internal tool calls. There is no mode-based
+# auto-allow shortcut. Every unmatched call goes to the overlay so the user
+# always sees a prompt. CC's native dialog only fires as a fallback when the
+# user explicitly cancels the overlay (Esc) or the overlay is unavailable.
+#
 # Reached when either:
 #   * an ask[] rule matched, or
 #   * no rule matched AND mode did NOT auto-allow.
