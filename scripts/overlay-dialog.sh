@@ -74,10 +74,12 @@ write_verdict_once() {
 
 write_verdict_always() {
   # $1 = yes_always | no_always
-  # $2 = proposed rule JSON (one line, compact)
+  # $2 = rule JSON (one line, compact)
+  # $3 = scope (project|user, default project)
   {
     printf '%s\n' "$1"
     printf '%s\n' "$2"
+    printf '%s\n' "${3:-project}"
   } > "$RESULT_FILE" 2>/dev/null || true
 }
 
@@ -154,11 +156,11 @@ if [ -n "$TEST_ANSWER" ]; then
       ;;
     yes_always)
       proposed="$(propose_rule)"
-      write_verdict_always "yes_always" "$proposed"
+      write_verdict_always "yes_always" "$proposed" "project"
       ;;
     no_always)
       proposed="$(propose_rule)"
-      write_verdict_always "no_always" "$proposed"
+      write_verdict_always "no_always" "$proposed" "project"
       ;;
     cancel)
       :
@@ -413,6 +415,9 @@ prop_tool="$(jq -r '.tool // ""' <<<"$proposed" 2>/dev/null)"
 prop_match_key="$(jq -r '.match // empty | keys[0] // empty' <<<"$proposed" 2>/dev/null)"
 prop_match_val="$(jq -r '.match // empty | to_entries[0].value // empty' <<<"$proposed" 2>/dev/null)"
 
+# Scope defaults to project. Tab toggles between project/user.
+rule_scope="project"
+
 render_rule_editor() {
   printf '\033[H\033[2J'
   _render_header "$_display_cwd"
@@ -431,6 +436,12 @@ render_rule_editor() {
   printf "  Tool regex:  ${GREEN}%s${RESET}\n" "$prop_tool"
   if [ -n "$prop_match_key" ]; then
     printf "  Match %-6s ${GREEN}%s${RESET}\n" "${prop_match_key}:" "$prop_match_val"
+  fi
+  # Scope toggle: highlight the active scope.
+  if [ "$rule_scope" = "project" ]; then
+    printf "  Scope:       ${REVERSE} project ${RESET} \033[2muser\033[0m  \033[2m(Tab to toggle)\033[0m\n"
+  else
+    printf "  Scope:       \033[2mproject\033[0m ${REVERSE} user ${RESET}  \033[2m(Tab to toggle)\033[0m\n"
   fi
   printf '\n'
 }
@@ -514,6 +525,15 @@ while true; do
       prop_tool="$edited_tool"
       render_confirm_screen
       ;;
+    $'\t')
+      # Tab toggles scope.
+      if [ "$rule_scope" = "project" ]; then
+        rule_scope="user"
+      else
+        rule_scope="project"
+      fi
+      render_confirm_screen
+      ;;
     esc|timeout)
       exec bash "$0"
       ;;
@@ -529,6 +549,6 @@ if [ -n "$prop_match_key" ] && [ -n "$prop_match_val" ]; then
 else
   final_rule="$(jq -cn --arg t "$prop_tool" '{tool: $t}')"
 fi
-write_verdict_always "$answer" "$final_rule"
+write_verdict_always "$answer" "$final_rule" "$rule_scope"
 
 exit 0
