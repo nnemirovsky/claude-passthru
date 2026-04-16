@@ -279,11 +279,14 @@ case "$_display_cwd" in
   "$HOME"/*) _display_cwd="~${_display_cwd#"$HOME"}" ;;
   "$HOME")   _display_cwd="~" ;;
 esac
-# Session label: tmux window name if available, otherwise omit.
+# Session label: multiplexer window/tab name if available.
 _session_label=""
 if [ -n "${TMUX:-}" ]; then
-  _w="$(tmux display-message -p '#W' 2>/dev/null || true)"
-  [ -n "$_w" ] && _session_label="$_w"
+  _session_label="$(tmux display-message -p '#W' 2>/dev/null || true)"
+elif [ -n "${KITTY_WINDOW_ID:-}" ]; then
+  _session_label="$(kitty @ get-text --match "id:${KITTY_WINDOW_ID}" 2>/dev/null | head -c 0 ; kitty @ ls 2>/dev/null | jq -r --arg id "$KITTY_WINDOW_ID" '[.[].tabs[].windows[] | select(.id == ($id | tonumber))][0].title // empty' 2>/dev/null || true)"
+elif [ -n "${WEZTERM_PANE:-}" ]; then
+  _session_label="$(wezterm cli list --format json 2>/dev/null | jq -r --arg p "$WEZTERM_PANE" '.[] | select(.pane_id == ($p | tonumber)) | .title // empty' 2>/dev/null || true)"
 fi
 
 _render_header() {
