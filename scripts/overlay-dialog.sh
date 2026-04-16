@@ -178,48 +178,115 @@ MENU_KEYS=(y a n d esc)
 MENU_COUNT=${#MENU_LABELS[@]}
 selected=0
 
-# Build a human-readable preview from tool_input. Extract the most relevant
-# field per tool type instead of showing raw JSON.
-preview=""
+# Build a human-readable preview from tool_input. Each tool type gets a
+# tailored display. MCP tools show pretty JSON. Edits show a diff preview.
+_extract() { jq -r --arg f "$1" '.[$f] // empty' <<<"$TOOL_INPUT_JSON" 2>/dev/null; }
+_truncate() {
+  local s="$1" max="${2:-120}"
+  if [ "${#s}" -gt "$max" ]; then
+    printf '%s...' "${s:0:$((max - 3))}"
+  else
+    printf '%s' "$s"
+  fi
+}
+
+# preview_lines: array of lines to display. Populated per tool type.
+preview_lines=()
+extra_height=0  # additional lines beyond standard 1-line preview
+
 if [ -n "$TOOL_INPUT_JSON" ]; then
-  _extract() { jq -r --arg f "$1" '.[$f] // empty' <<<"$TOOL_INPUT_JSON" 2>/dev/null; }
   case "$TOOL_NAME" in
     Bash)
-      preview="$(_extract command)" ;;
-    WebFetch|WebSearch)
-      preview="$(_extract url)"
-      [ -z "$preview" ] && preview="$(_extract query)" ;;
-    Read|Edit|Write|NotebookEdit|NotebookRead)
-      preview="$(_extract file_path)" ;;
+      preview_lines+=("$(_truncate "$(_extract command)" 120)")
+      ;;
+    WebFetch)
+      preview_lines+=("$(_extract url)")
+      ;;
+    WebSearch)
+      _q="$(_extract query)"
+      [ -n "$_q" ] && preview_lines+=("search: $_q") || preview_lines+=("$(_extract url)")
+      ;;
+    Edit|Write)
+      preview_lines+=("$(_extract file_path)")
+      ;;
+    Read|NotebookRead)
+      preview_lines+=("$(_extract file_path)")
+      ;;
+    NotebookEdit)
+      _fp="$(_extract file_path)"
+      _cell="$(_extract cell_id)"
+      preview_lines+=("$_fp")
+      [ -n "$_cell" ] && preview_lines+=("cell: $_cell") && extra_height=1
+      ;;
     Grep)
-      preview="$(_extract pattern)"
+      _pat="$(_extract pattern)"
       _path="$(_extract path)"
-      [ -n "$_path" ] && preview="${preview}  (in ${_path})" ;;
+      preview_lines+=("/$_pat/")
+      [ -n "$_path" ] && preview_lines+=("in: $_path") && extra_height=1
+      ;;
     Glob)
-      preview="$(_extract pattern)"
+      _pat="$(_extract pattern)"
       _path="$(_extract path)"
-      [ -n "$_path" ] && preview="${preview}  (in ${_path})" ;;
+      preview_lines+=("$_pat")
+      [ -n "$_path" ] && preview_lines+=("in: $_path") && extra_height=1
+      ;;
+    Skill)
+      _skill="$(_extract skill)"
+      _args="$(_extract args)"
+      if [ -n "$_args" ]; then
+        preview_lines+=("$_skill $_args")
+      else
+        preview_lines+=("$_skill")
+      fi
+      ;;
     Agent)
-      preview="$(_extract description)"
-      [ -z "$preview" ] && preview="$(_extract prompt | head -c 120)" ;;
+      _desc="$(_extract description)"
+      [ -n "$_desc" ] && preview_lines+=("$_desc") || preview_lines+=("$(_truncate "$(_extract prompt)" 120)")
+      ;;
+    mcp__*)
+      # MCP tools: pretty-print the JSON args with indentation.
+      _pretty="$(jq -r '.' <<<"$TOOL_INPUT_JSON" 2>/dev/null || echo "$TOOL_INPUT_JSON")"
+      _line_count=0
+      _total_lines=0
+      while IFS= read -r _line; do
+        _total_lines=$((_total_lines + 1))
+        if [ "$_line_count" -lt 10 ]; then
+          preview_lines+=("$_line")
+          _line_count=$((_line_count + 1))
+        fi
+      done <<<"$_pretty"
+      if [ "$_total_lines" -gt 10 ]; then
+        _remaining=$((_total_lines - 10))
+        preview_lines+=("  ... (${_remaining} more lines)")
+        _line_count=$((_line_count + 1))
+      fi
+      extra_height=$((_line_count - 1))
+      ;;
     *)
-      preview="$TOOL_INPUT_JSON" ;;
+      preview_lines+=("$(_truncate "$TOOL_INPUT_JSON" 120)")
+      ;;
   esac
-  # Fallback to raw JSON if extraction yielded nothing.
-  [ -z "$preview" ] && preview="$TOOL_INPUT_JSON"
-  max_preview=120
-  truncated_len=$((max_preview - 3))
-  if [ "${#preview}" -gt "$max_preview" ]; then
-    preview="${preview:0:$truncated_len}..."
-  fi
+fi
+# Fallback if nothing was extracted.
+if [ "${#preview_lines[@]}" -eq 0 ]; then
+  preview_lines+=("$(_truncate "$TOOL_INPUT_JSON" 120)")
 fi
 
 render_main_menu() {
-  # Move cursor to top-left and clear screen.
   printf '\033[H\033[2J'
   printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
   printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
-  printf "Input: ${DIM}%s${RESET}\n\n" "$preview"
+  # Render preview lines.
+  local first=1
+  for _pline in "${preview_lines[@]}"; do
+    if [ "$first" -eq 1 ]; then
+      printf "Input: ${DIM}%b${RESET}\n" "$_pline"
+      first=0
+    else
+      printf "       ${DIM}%b${RESET}\n" "$_pline"
+    fi
+  done
+  printf '\n'
 
   local i
   for ((i = 0; i < MENU_COUNT; i++)); do
@@ -301,19 +368,40 @@ fi
 
 proposed="$(propose_rule)"
 
-CONFIRM_LABELS=("[Enter] Accept rule" "[E] Edit rule JSON" "[Esc] Back to menu")
+# Extract tool regex and match fields from the proposed rule for two-field editing.
+prop_tool="$(jq -r '.tool // ""' <<<"$proposed" 2>/dev/null)"
+prop_match_key="$(jq -r '.match // empty | keys[0] // empty' <<<"$proposed" 2>/dev/null)"
+prop_match_val="$(jq -r '.match // empty | to_entries[0].value // empty' <<<"$proposed" 2>/dev/null)"
+
+render_rule_editor() {
+  printf '\033[H\033[2J'
+  printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
+  printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
+  local _first=1
+  for _pl in "${preview_lines[@]}"; do
+    if [ "$_first" -eq 1 ]; then
+      printf "Input: ${DIM}%b${RESET}\n" "$_pl"
+      _first=0
+    else
+      printf "       ${DIM}%b${RESET}\n" "$_pl"
+    fi
+  done
+  printf '\n'
+  printf "Suggested rule:\n"
+  printf "  Tool regex:  ${GREEN}%s${RESET}\n" "$prop_tool"
+  if [ -n "$prop_match_key" ]; then
+    printf "  Match %-6s ${GREEN}%s${RESET}\n" "${prop_match_key}:" "$prop_match_val"
+  fi
+  printf '\n'
+}
+
+CONFIRM_LABELS=("[Enter] Accept rule" "[E] Edit fields" "[Esc] Back to menu")
 CONFIRM_KEYS=(enter e esc)
 CONFIRM_COUNT=${#CONFIRM_LABELS[@]}
 confirm_sel=0
 
-render_confirm_menu() {
-  printf '\033[H\033[2J'
-  printf "${BOLD}Passthru Permission Prompt${RESET}\n\n"
-  printf "Tool:  ${CYAN}%s${RESET}\n" "${TOOL_NAME:-(unknown)}"
-  printf "Input: ${DIM}%s${RESET}\n\n" "$preview"
-  printf "Suggested rule:\n"
-  printf "  ${GREEN}%s${RESET}\n\n" "$proposed"
-
+render_confirm_screen() {
+  render_rule_editor
   local i
   for ((i = 0; i < CONFIRM_COUNT; i++)); do
     if [ "$i" -eq "$confirm_sel" ]; then
@@ -325,75 +413,82 @@ render_confirm_menu() {
   printf "\n\033[2mUse arrow keys or press a letter key\033[0m\n"
 }
 
-render_confirm_menu
+render_confirm_screen
 
 while true; do
   read_key
 
   case "$KEY" in
     up)
-      if [ "$confirm_sel" -gt 0 ]; then
-        confirm_sel=$((confirm_sel - 1))
-      else
-        confirm_sel=$((CONFIRM_COUNT - 1))
-      fi
-      render_confirm_menu
+      confirm_sel=$(( (confirm_sel - 1 + CONFIRM_COUNT) % CONFIRM_COUNT ))
+      render_confirm_screen
       ;;
     down)
-      if [ "$confirm_sel" -lt $((CONFIRM_COUNT - 1)) ]; then
-        confirm_sel=$((confirm_sel + 1))
-      else
-        confirm_sel=0
-      fi
-      render_confirm_menu
+      confirm_sel=$(( (confirm_sel + 1) % CONFIRM_COUNT ))
+      render_confirm_screen
       ;;
     enter)
       case "${CONFIRM_KEYS[$confirm_sel]}" in
-        enter)
-          write_verdict_always "$answer" "$proposed"
-          exit 0
-          ;;
+        enter) break ;;
         e)
-          # Edit path below.
-          break
+          # Two-field editor below.
+          printf '\033[H\033[2J'
+          printf "${BOLD}Edit Rule${RESET}\n\n"
+          printf "Edit each field. Leave blank to keep the suggested value.\n\n"
+          printf "Tool regex ${DIM}[%s]${RESET}: " "$prop_tool"
+          edited_tool=""
+          IFS= read -r -e -t "$TIMEOUT" edited_tool || true
+          [ -z "$edited_tool" ] && edited_tool="$prop_tool"
+          if [ -n "$prop_match_key" ]; then
+            printf "Match %s ${DIM}[%s]${RESET}: " "$prop_match_key" "$prop_match_val"
+            edited_match=""
+            IFS= read -r -e -t "$TIMEOUT" edited_match || true
+            [ -z "$edited_match" ] && edited_match="$prop_match_val"
+            prop_match_val="$edited_match"
+          fi
+          prop_tool="$edited_tool"
+          # Rebuild and re-render.
+          render_confirm_screen
           ;;
         esc)
-          # Back to main menu. Re-run entire script via exec for simplicity.
           exec bash "$0"
           ;;
       esac
       ;;
     e)
-      break  # fall through to edit
+      # Two-field editor (shortcut).
+      printf '\033[H\033[2J'
+      printf "${BOLD}Edit Rule${RESET}\n\n"
+      printf "Edit each field. Leave blank to keep the suggested value.\n\n"
+      printf "Tool regex ${DIM}[%s]${RESET}: " "$prop_tool"
+      edited_tool=""
+      IFS= read -r -e -t "$TIMEOUT" edited_tool || true
+      [ -z "$edited_tool" ] && edited_tool="$prop_tool"
+      if [ -n "$prop_match_key" ]; then
+        printf "Match %s ${DIM}[%s]${RESET}: " "$prop_match_key" "$prop_match_val"
+        edited_match=""
+        IFS= read -r -e -t "$TIMEOUT" edited_match || true
+        [ -z "$edited_match" ] && edited_match="$prop_match_val"
+        prop_match_val="$edited_match"
+      fi
+      prop_tool="$edited_tool"
+      render_confirm_screen
       ;;
     esc|timeout)
-      # Back to main menu.
       exec bash "$0"
       ;;
     *)
-      # Unknown key: ignore.
       ;;
   esac
 done
 
-# Edit path: read a full line with readline.
-printf '\033[H\033[2J'
-printf "${BOLD}Edit Rule JSON${RESET}\n\n"
-printf "Current:\n  ${GREEN}%s${RESET}\n\n" "$proposed"
-printf "Type new JSON (leave blank to accept):\n"
-edited=""
-if ! IFS= read -r -e -t "$TIMEOUT" edited; then
-  exit 0
-fi
-if [ -z "$edited" ]; then
-  write_verdict_always "$answer" "$proposed"
-elif jq -e 'type == "object"' >/dev/null 2>&1 <<<"$edited"; then
-  write_verdict_always "$answer" "$edited"
+# Build the final rule JSON from the (possibly edited) fields.
+if [ -n "$prop_match_key" ] && [ -n "$prop_match_val" ]; then
+  final_rule="$(jq -cn --arg t "$prop_tool" --arg k "$prop_match_key" --arg v "$prop_match_val" \
+    '{tool: $t, match: {($k): $v}}')"
 else
-  printf '\n${RED}Invalid JSON (must be an object)${RESET}\n'
-  printf 'Using suggested rule: %s\n' "$proposed"
-  sleep 2
-  write_verdict_always "$answer" "$proposed"
+  final_rule="$(jq -cn --arg t "$prop_tool" '{tool: $t}')"
 fi
+write_verdict_always "$answer" "$final_rule"
 
 exit 0

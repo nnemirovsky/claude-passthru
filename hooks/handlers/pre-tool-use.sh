@@ -487,7 +487,7 @@ fi
 # that should never trigger the overlay. Pass them through unconditionally.
 if [ "$MATCHED" != "ask" ]; then
   case "$TOOL_NAME" in
-    ToolSearch|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|\
+    ToolSearch|Skill|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|\
     AskUserQuestion|SendMessage|EnterPlanMode|ExitPlanMode|ScheduleWakeup|\
     CronCreate|CronDelete|CronList|Monitor|LSP|RemoteTrigger|\
     EnterWorktree|ExitWorktree|TeamCreate|TeamDelete)
