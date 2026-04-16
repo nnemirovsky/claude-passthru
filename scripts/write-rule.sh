@@ -4,14 +4,20 @@
 # Usage:
 #   write-rule.sh <scope> <list> <rule_json>
 #   scope = user|project
-#   list  = allow|deny
+#   list  = allow|deny|ask
 #
 # Behaviour:
 #   1. Resolve target passthru.json path (honors PASSTHRU_USER_HOME +
-#      PASSTHRU_PROJECT_DIR). Create it if missing with
-#      {"version":1,"allow":[],"deny":[]}.
+#      PASSTHRU_PROJECT_DIR). Create it if missing with the v2 skeleton
+#      {"version":2,"allow":[],"ask":[],"deny":[]} so the file is
+#      self-documenting about ask support going forward.
 #   2. Take a backup of the current file (if any) to a temp file.
 #   3. Append <rule_json> to the chosen list via jq (pure JSON manipulation).
+#      When the chosen list is `ask` and the target file is currently
+#      version 1, upgrade it in place to version 2 (preserving all existing
+#      fields) and add an empty ask[] array before appending. Allow/deny
+#      writes against a v1 file do NOT trigger an upgrade, so users who
+#      never opt into ask keep their v1 files stable.
 #   4. Run scripts/verify.sh --quiet to validate the new file alongside the
 #      other scope files.
 #   5. On verifier failure: restore backup atomically (mv over target), print
@@ -53,7 +59,7 @@ if [ $# -ne 3 ]; then
   cat <<USAGE >&2
 usage: write-rule.sh <scope> <list> <rule_json>
   scope = user|project
-  list  = allow|deny
+  list  = allow|deny|ask
   rule_json = a JSON object
 USAGE
   exit 1
@@ -69,8 +75,8 @@ case "$SCOPE" in
 esac
 
 case "$LIST" in
-  allow|deny) ;;
-  *) printf 'write-rule.sh: invalid list: %s (want allow|deny)\n' "$LIST" >&2; exit 1 ;;
+  allow|deny|ask) ;;
+  *) printf 'write-rule.sh: invalid list: %s (want allow|deny|ask)\n' "$LIST" >&2; exit 1 ;;
 esac
 
 # Validate the rule JSON parses as an object.
@@ -171,7 +177,10 @@ trap 'exit 1' INT TERM
 # ---------------------------------------------------------------------------
 
 if [ ! -e "$TARGET" ]; then
-  printf '{"version":1,"allow":[],"deny":[]}\n' > "$TARGET"
+  # Fresh-file skeleton: always emit v2 with all three arrays so the file
+  # self-documents that ask[] is supported. This applies regardless of
+  # which list this invocation is appending to.
+  printf '{"version":2,"allow":[],"ask":[],"deny":[]}\n' > "$TARGET"
 fi
 
 # Verify target parses before attempting any mutation.
@@ -197,11 +206,19 @@ STATE="BACKED_UP"
 NEW_CONTENT="$(
   jq --argjson rule "$RULE_JSON" --arg list "$LIST" '
     (.version // 1) as $v
-    | . as $doc
-    | $doc
-    | .version = $v
+    # Target version after this write: upgrade to 2 iff the caller is
+    # writing to ask[]. allow/deny writes against a v1 file keep the file
+    # at v1 so opt-in to the v2 schema is explicit and tied to ask use.
+    | (if $list == "ask" and $v < 2 then 2 else $v end) as $new_v
+    | .
+    | .version = $new_v
     | .allow = (.allow // [])
     | .deny  = (.deny // [])
+    # Only materialize ask[] when the resulting version is >= 2. For v1
+    # files that receive an allow or deny write, we deliberately leave
+    # any pre-existing ask key untouched (validate_rules ignores it on
+    # v1 files and we do not want to silently promote the schema).
+    | (if $new_v >= 2 then .ask = (.ask // []) else . end)
     | .[$list] = (.[$list] + [$rule])
   ' "$TARGET"
 )" || {

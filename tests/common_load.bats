@@ -42,7 +42,9 @@ place() {
   run load_rules
   [ "$status" -eq 0 ]
   [ -n "$output" ]
-  run jq -e '.version == 1 and (.allow | length == 0) and (.deny | length == 0)' <<<"$output"
+  # Merged output is always emitted as v2 (superset of v1), with empty
+  # allow/deny/ask arrays when no files contribute any rules.
+  run jq -e '.version == 2 and (.allow | length == 0) and (.deny | length == 0) and (.ask | length == 0)' <<<"$output"
   [ "$status" -eq 0 ]
 }
 
@@ -162,6 +164,167 @@ place() {
 }
 
 # ---------------------------------------------------------------------------
+# Schema v2: ask[] array
+# ---------------------------------------------------------------------------
+
+@test "load_rules: v1 file still loads as before (ask-rule absent in output)" {
+  # user-only.json is v1 with no ask[] key. load_rules must emit
+  # an empty ask[] in the merged output.
+  place "$USER_ROOT/.claude/passthru.json" "user-only.json"
+  merged="$(load_rules)"
+  run jq -r '.version' <<<"$merged"
+  [ "$output" = "2" ]   # merged output is always v2 (superset).
+  run jq -r '.allow | length' <<<"$merged"
+  [ "$output" = "2" ]
+  run jq -r '.deny | length' <<<"$merged"
+  [ "$output" = "1" ]
+  # Crucially: ask[] is present and empty.
+  run jq -r '.ask | length' <<<"$merged"
+  [ "$output" = "0" ]
+  # Must also pass validate_rules.
+  run validate_rules "$merged"
+  [ "$status" -eq 0 ]
+}
+
+@test "load_rules: v2 file with ask[] rules loads" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    {"tool":"Bash","match":{"command":"^ls"}}
+  ],
+  "deny": [
+    {"tool":"Bash","match":{"command":"rm\\s+-rf\\s+/"}}
+  ],
+  "ask": [
+    {"tool":"WebFetch","match":{"url":"^https?://unsafe\\."},"reason":"prompt on this domain"},
+    {"tool":"^Bash$","match":{"command":"^gh api /repos/[^/]+/[^/]+/delete"}}
+  ]
+}
+EOF
+  merged="$(load_rules)"
+  [ -n "$merged" ]
+  run jq -r '.ask | length' <<<"$merged"
+  [ "$output" = "2" ]
+  run jq -r '.ask[0].reason' <<<"$merged"
+  [ "$output" = "prompt on this domain" ]
+  run jq -r '.ask[1].tool' <<<"$merged"
+  [ "$output" = "^Bash$" ]
+  run validate_rules "$merged"
+  [ "$status" -eq 0 ]
+}
+
+@test "load_rules: v2 ask[] concatenates across scopes in fixed order" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [
+    {"tool":"UserAsk","reason":"user scope"}
+  ]
+}
+EOF
+  cat > "$PROJ_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [
+    {"tool":"ProjectAsk","reason":"project scope"}
+  ]
+}
+EOF
+  merged="$(load_rules)"
+  # user-scope ask first, project-scope ask second.
+  run jq -r '.ask | length' <<<"$merged"
+  [ "$output" = "2" ]
+  run jq -r '.ask[0].reason' <<<"$merged"
+  [ "$output" = "user scope" ]
+  run jq -r '.ask[1].reason' <<<"$merged"
+  [ "$output" = "project scope" ]
+}
+
+@test "load_rules: v1 file with stray ask[] key -> ask entries are ignored" {
+  # A v1 file that somehow carries an ask[] key (hand-edit, partial migration)
+  # must NOT surface those entries. ask[] is v2-only.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 1,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [],
+  "ask": [{"tool":"WebFetch","reason":"ignored because v1"}]
+}
+EOF
+  merged="$(load_rules)"
+  run jq -r '.ask | length' <<<"$merged"
+  [ "$output" = "0" ]
+  # allow[] is still picked up normally.
+  run jq -r '.allow | length' <<<"$merged"
+  [ "$output" = "1" ]
+}
+
+@test "load_rules: v2 file with malformed ask[] entry fails validation" {
+  # Malformed rule = has neither tool nor match. load_rules still loads the
+  # JSON, but validate_rules on the merged output must reject it.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [
+    {"reason":"malformed, missing tool and match"}
+  ]
+}
+EOF
+  merged="$(load_rules)"
+  [ -n "$merged" ]
+  run validate_rules "$merged"
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"ask"* ]] || [[ "$output" == *"ask"* ]]
+}
+
+@test "load_rules: v3 file -> validate_rules on raw file returns error" {
+  # Unknown future version must be rejected by validate_rules when it is
+  # called on the raw file JSON (what verify.sh does per-file). load_rules
+  # always rewrites the merged output to version 2 (strict superset),
+  # so that path does not expose the raw version. The verifier's per-file
+  # version check is covered separately in tests/verifier.bats.
+  local raw='{"version":3,"allow":[],"deny":[]}'
+  run validate_rules "$raw"
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"version"* ]] || [[ "$output" == *"version"* ]]
+}
+
+@test "load_rules: mixed v1 + v2 files merge with only v2 contributing ask[]" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 1,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": []
+}
+EOF
+  cat > "$PROJ_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [],
+  "deny": [],
+  "ask": [
+    {"tool":"WebFetch","reason":"from v2 file"}
+  ]
+}
+EOF
+  merged="$(load_rules)"
+  run jq -r '.allow | length' <<<"$merged"
+  [ "$output" = "1" ]
+  # Only the v2 project file's ask[] contributes.
+  run jq -r '.ask | length' <<<"$merged"
+  [ "$output" = "1" ]
+  run jq -r '.ask[0].reason' <<<"$merged"
+  [ "$output" = "from v2 file" ]
+}
+
+# ---------------------------------------------------------------------------
 # validate_rules
 # ---------------------------------------------------------------------------
 
@@ -205,9 +368,61 @@ place() {
 }
 
 @test "validate_rules rejects unsupported version" {
-  run validate_rules '{"version":2,"allow":[],"deny":[]}'
+  # v3 is out of the accepted range (1 or 2). v2 is now accepted as a
+  # superset of v1 with the optional ask[] array.
+  run validate_rules '{"version":3,"allow":[],"deny":[]}'
   [ "$status" -ne 0 ]
   [[ "$stderr" == *"version"* ]] || [[ "$output" == *"version"* ]]
+}
+
+@test "validate_rules accepts version 2 with empty arrays" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[]}'
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_rules accepts version 2 without ask[] declared" {
+  # ask[] is optional on v2 files. Missing ask[] is treated as an empty list.
+  run validate_rules '{"version":2,"allow":[],"deny":[]}'
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_rules accepts version 2 with valid ask rule" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[{"tool":"WebFetch","match":{"url":"^https?://"}}]}'
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_rules rejects malformed ask rule on v2 (neither tool nor match)" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[{"reason":"no tool, no match"}]}'
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"at least one"* ]] || [[ "$output" == *"at least one"* ]]
+  # The error must name the offending list so users can locate it.
+  [[ "$stderr" == *"ask"* ]] || [[ "$output" == *"ask"* ]]
+}
+
+@test "validate_rules rejects non-string tool on v2 ask rule" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[{"tool":42}]}'
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"ask"* ]] || [[ "$output" == *"ask"* ]]
+}
+
+@test "validate_rules rejects empty ask match value string on v2" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[{"tool":"Bash","match":{"command":""}}]}'
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"non-empty"* ]] || [[ "$output" == *"non-empty"* ]]
+}
+
+@test "validate_rules rejects .ask that is not an array on v2" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":"oops"}'
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"ask"* ]] || [[ "$output" == *"ask"* ]]
+}
+
+@test "validate_rules ignores ask[] on v1 (schema does not recognize it)" {
+  # A v1 file that happens to include ask[] is still valid from the
+  # validator's perspective: validate_rules only validates ask[] on v2.
+  # Loader-side behavior (drop v1 ask[] entries) is covered in load_rules tests.
+  run validate_rules '{"version":1,"allow":[],"deny":[],"ask":[{"reason":"would be invalid on v2"}]}'
+  [ "$status" -eq 0 ]
 }
 
 @test "validate_rules rejects .allow that is not an array" {

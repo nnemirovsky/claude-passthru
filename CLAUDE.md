@@ -16,10 +16,11 @@ commands/
   remove.md            /passthru:remove slash command (wraps scripts/remove-rule.sh)
   verify.md            /passthru:verify slash command (prompt-based)
   log.md               /passthru:log slash command (prompt-based)
+  overlay.md           /passthru:overlay slash command (wraps scripts/overlay-config.sh)
 hooks/
-  hooks.json           registers PreToolUse + PostToolUse + PostToolUseFailure
-                       (timeout 10s each, matcher "*") and SessionStart
-                       (timeout 5s, no matcher) handlers
+  hooks.json           registers PreToolUse (timeout 75s, matcher "*"), PostToolUse +
+                       PostToolUseFailure (timeout 10s each, matcher "*"), and
+                       SessionStart (timeout 5s, no matcher) handlers
   common.sh            shared library. Functions:
                          * load_rules / validate_rules (merge + schema-check)
                          * pcre_match / match_rule / find_first_match (rule matching)
@@ -51,14 +52,39 @@ scripts/
   bootstrap.sh         one-time importer from native permissions.allow into passthru.imported.json.
                        Supported shapes: Bash(prefix:*) | Bash(exact) | mcp__* | WebFetch(domain:X)
                        | WebSearch | Read/Edit/Write(path[/**]) | Skill(name). Others -> [WARN] skip.
-  write-rule.sh        atomic write wrapper: backup + append + verify + rollback
+                       Stamps every written rule with `_source_hash` (sha256 of the normalized
+                       source entry) so session-start.sh can diff imported vs importable.
+  write-rule.sh        atomic write wrapper: backup + append + verify + rollback. Also the
+                       v1 -> v2 upgrade point: first ask write on a v1 file flips the version.
   remove-rule.sh       atomic remove wrapper: backup + splice + verify + rollback. Authored-only.
-  list.sh              rule list viewer CLI with scope/list/source/index annotations
-  verify.sh            rule verifier CLI (also invoked by write-rule.sh/remove-rule.sh and /passthru:verify)
-  log.sh               audit-log viewer CLI + sentinel toggle
+  list.sh              rule list viewer CLI with scope/list/source/index annotations. Renders
+                       ALLOW / ASK / DENY groups; --list ask filters.
+  verify.sh            rule verifier CLI (also invoked by write-rule.sh/remove-rule.sh and /passthru:verify).
+                       Accepts schema v1 and v2. Rejects ask+allow and ask+deny conflicts.
+  log.sh               audit-log viewer CLI + sentinel toggle. color_for_event covers
+                       ask (cyan), errored (yellow), and overlay-sourced events.
+  overlay.sh           terminal-multiplexer dispatcher. Detects tmux / kitty / wezterm via
+                       env vars + PATH check, launches overlay-dialog.sh inside the popup.
+                       Writes verdict to $PASSTHRU_OVERLAY_RESULT_FILE.
+  overlay-dialog.sh    pure-bash TUI. Y/A/N/D/Esc keypress menu, optional rule editor on A/D.
+                       Respects PASSTHRU_OVERLAY_TEST_ANSWER for hermetic tests.
+                       PASSTHRU_OVERLAY_TIMEOUT bounds the wait (default 60s).
+  overlay-propose-rule.sh
+                       regex proposer. Takes tool_name + tool_input JSON, emits a rule JSON
+                       targeting one of four categories (Bash prefix, Read/Edit/Write path,
+                       WebFetch URL host, MCP namespace). Unknown tool -> bare ^<Name>$ rule.
+  overlay-config.sh    overlay sentinel toggle + multiplexer detection reporter. Backs
+                       /passthru:overlay.
 tests/
-  fixtures/            JSON fixture files used by bats tests
-  *.bats               test suites (one per script or component)
+  fixtures/
+    overlay/           stub tmux/kitty/wezterm shell scripts used by overlay tests.
+    *.json             JSON fixture files.
+  overlay.bats         overlay.sh + overlay-dialog.sh + overlay-propose-rule.sh coverage.
+  overlay_config.bats  overlay-config.sh + /passthru:overlay frontmatter coverage.
+  post_tool_use_failure_hook.bats
+                       PostToolUseFailure handler coverage (permission errors, generic
+                       errored events, timeouts, interrupts, missing breadcrumb).
+  *.bats               test suites (one per script or component).
 docs/
   rule-format.md       schema reference
   examples.md          real-world rule examples
@@ -69,6 +95,19 @@ CLAUDE.md              this file
 ```
 
 Paths honor `PASSTHRU_USER_HOME` and `PASSTHRU_PROJECT_DIR` so tests never touch the real `~/.claude`.
+
+## Environment variables
+
+Variables the plugin reads at runtime. Most are test-only overrides; a couple (`PASSTHRU_OVERLAY_TIMEOUT`, `PASSTHRU_WRITE_LOCK_TIMEOUT`) have user-facing meaning.
+
+* `PASSTHRU_USER_HOME` - override `~/.claude` as the user scope root. Used by every bats test to redirect reads and writes to a temp dir. Never set in production.
+* `PASSTHRU_PROJECT_DIR` - override `$PWD/.claude` as the project scope root. Same use case as above. Tests set both.
+* `PASSTHRU_OVERLAY_RESULT_FILE` - path the overlay dispatcher writes the verdict line(s) into. Set by `pre-tool-use.sh` per-invocation via `sanitize_tool_use_id` + `passthru_tmpdir`. The overlay script reads the path from this env var; the hook reads back the contents after the overlay exits.
+* `PASSTHRU_OVERLAY_TEST_ANSWER` - short-circuit the interactive keypress loop in `overlay-dialog.sh`. Accepts `yes_once|yes_always|no_once|no_always|cancel`. Used exclusively by `tests/overlay.bats` + `tests/hook_handler.bats` to exercise every branch without pseudo-tty gymnastics. Never set by the hook in production.
+* `PASSTHRU_OVERLAY_TOOL_NAME` - tool name passed into the overlay dialog. Hook propagates the inbound `tool_name` field verbatim.
+* `PASSTHRU_OVERLAY_TOOL_INPUT_JSON` - tool input JSON (stringified) passed into the overlay dialog. Hook propagates the inbound `tool_input` field verbatim. The dialog and `overlay-propose-rule.sh` parse it for the suggested-rule screen.
+* `PASSTHRU_OVERLAY_TIMEOUT` - seconds to wait for a user response inside the overlay. Default 60. If the user does not respond in time, the overlay exits without writing a verdict and the hook treats the prompt as cancelled (falls through to the native dialog). Setting below 60 is fine; setting above requires also raising the PreToolUse hook timeout (currently 75s).
+* `PASSTHRU_WRITE_LOCK_TIMEOUT` - seconds `scripts/write-rule.sh` and `scripts/remove-rule.sh` wait for the user-scope mkdir lock. Default 5. See the "Write-wrapper locking" section below.
 
 ## How tests run
 
@@ -141,11 +180,11 @@ Exit codes:
 Checks performed (in order, across the merged set):
 
 1. **parse** - every existing file is valid JSON.
-2. **schema** - every rule has at least one of `tool` or `match`, types match spec, version is `1`.
+2. **schema** - every rule has at least one of `tool` or `match`, types match spec, version is `1` or `2`. v2 files may declare `ask[]`; rules in `ask[]` are validated with the same rule-shape checks as `allow[]` and `deny[]`.
 3. **regex** - every `tool` regex and every `match.*` regex compiles in perl.
 4. **duplicates** - exact-duplicate rules (same tool + match) across scopes emit a warning.
-5. **conflict** - identical `tool + match` appears in both `allow[]` and `deny[]` (merged) emits an error.
-6. **shadowing** - within one merged `allow[]` or `deny[]` array, a later rule duplicates an earlier one. Warning.
+5. **conflict** - identical `tool + match` appears in two or more of `allow[]`, `deny[]`, `ask[]` (merged) emits an error.
+6. **shadowing** - within one merged `allow[]`, `deny[]`, or `ask[]` array, a later rule duplicates an earlier one. Warning.
 
 ## Write-wrapper locking
 
@@ -168,8 +207,26 @@ concurrent project shells.
 
 ## Hook timeout
 
-Both `PreToolUse` and `PostToolUse` are registered with `"timeout": 10` in
-`hooks/hooks.json`. The reason for 10 seconds (rather than 2-3):
+`PostToolUse`, `PostToolUseFailure`, and `SessionStart` are registered with
+short timeouts (10s / 10s / 5s) in `hooks/hooks.json`. `PreToolUse` runs with
+a **75s** timeout because Task 8 (v0.5.0) wired the hook to block
+synchronously on the interactive terminal-overlay dialog.
+
+The 75s figure breaks down as:
+
+* The overlay dialog (`scripts/overlay-dialog.sh`) enforces its own 60s
+  budget (`PASSTHRU_OVERLAY_TIMEOUT`, default 60s).
+* Add 15s of margin for overlay launch, multiplexer roundtrip, post-dialog
+  rule write via `write-rule.sh`, and audit line emission.
+* CC's hook timeout is wall-clock (confirmed via `time sleep 1`: 1.008s
+  real). Anything below the overlay's own budget would kill the hook
+  mid-dialog and lose the user's verdict.
+
+The 10s baseline for non-overlay PreToolUse paths (rule match, mode
+auto-allow) still applies in the sense that none of them block on IO; the
+75s cap only matters when the overlay is actually invoked.
+
+For post-event handlers, the original 10s baseline continues to hold:
 
 * `load_rules` shells out to `jq` once per rule file (up to 4 files), once for
   the parse check, once for normalization, and once for the merge.
@@ -183,8 +240,9 @@ Both `PreToolUse` and `PostToolUse` are registered with `"timeout": 10` in
   audit fidelity, never block a tool call. Choosing 10s leaves 5x headroom
   over typical worst case.
 
-Lower the timeout only after profiling on the target hardware. Higher is
-fine.
+Lower the PreToolUse timeout only after also lowering
+`PASSTHRU_OVERLAY_TIMEOUT` (and only after profiling on target hardware).
+Raising it is always safe since the handler fails open on timeout.
 
 ## Releases
 
@@ -230,3 +288,6 @@ The release flow in one-line form:
 * Adding a new hook event: register it in `hooks/hooks.json` and add a handler under `hooks/handlers/`. Reuse `hooks/common.sh` helpers where possible.
 * Adding a new verifier check: see `CONTRIBUTING.md` section "Adding a new verifier check".
 * Adding a new rule type or schema field: see `CONTRIBUTING.md` section "Rule schema evolution".
+* Changing the overlay UI or keyboard flow: `scripts/overlay-dialog.sh` is the TUI, `scripts/overlay.sh` is the multiplexer dispatcher, and `scripts/overlay-propose-rule.sh` proposes the regex on A/D. Test via `PASSTHRU_OVERLAY_TEST_ANSWER`; see `tests/overlay.bats` for the stub-tmux pattern.
+* Changing ask-rule semantics: the merged document-order logic sits in `hooks/common.sh` (`find_first_match`) and `hooks/handlers/pre-tool-use.sh`. Ask rule parsing + validation is in `validate_rules` + `load_rules`. The verifier's conflict and shadowing checks in `scripts/verify.sh` must also cover `ask[]`.
+* Adding a new overlay multiplexer backend: add detection + launch lines in `scripts/overlay.sh` (search for the tmux / kitty / wezterm branches) and a stub fixture in `tests/fixtures/overlay/`. The shared detector helper lives in `hooks/common.sh` (`detect_overlay_multiplexer`).

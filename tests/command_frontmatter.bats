@@ -89,6 +89,14 @@ frontmatter_value() {
   [ -n "$output" ]
 }
 
+@test "commands/add.md frontmatter argument-hint mentions --ask flag" {
+  # Task 4: --ask is documented alongside --deny in the argument-hint so
+  # auto-completion and help surface the third list target.
+  run frontmatter_value "$COMMANDS_DIR/add.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ask"* ]]
+}
+
 @test "commands/add.md body mentions write-rule.sh" {
   run grep -q "write-rule.sh" "$COMMANDS_DIR/add.md"
   [ "$status" -eq 0 ]
@@ -101,6 +109,18 @@ frontmatter_value() {
 
 @test "commands/add.md body mentions --deny flag" {
   run grep -q -- '--deny' "$COMMANDS_DIR/add.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/add.md body mentions --ask flag" {
+  # Task 4: the body explains --ask as routing to the ask[] list.
+  run grep -q -- '--ask' "$COMMANDS_DIR/add.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/add.md body includes the worked --ask example" {
+  # Task 4: a runnable example that documents the canonical --ask form.
+  run grep -q 'passthru:add --ask' "$COMMANDS_DIR/add.md"
   [ "$status" -eq 0 ]
 }
 
@@ -162,6 +182,21 @@ frontmatter_value() {
   run grep -q 'allow' "$COMMANDS_DIR/suggest.md"
   [ "$status" -eq 0 ]
   run grep -q 'deny' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions ask as a third option" {
+  # Task 5: after regex confirmation, suggest offers allow/ask/deny.
+  # The body must mention ask alongside allow and deny so the
+  # write-rule.sh invocation supports routing to the ask list.
+  run grep -qi 'ask' "$COMMANDS_DIR/suggest.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/suggest.md body mentions the three-way list target in write-rule.sh" {
+  # The write-rule.sh invocation line must advertise allow|ask|deny as the
+  # list options so Claude picks the right one at runtime.
+  run grep -qE 'allow\|ask\|deny|allow.*ask.*deny' "$COMMANDS_DIR/suggest.md"
   [ "$status" -eq 0 ]
 }
 
@@ -421,6 +456,25 @@ frontmatter_value() {
   [[ "$output" == *"--tool"* ]]
 }
 
+@test "commands/list.md frontmatter argument-hint mentions ask as a --list value" {
+  # Task 5: ask is documented alongside allow/deny in the --list argument
+  # so shell completion and help text surface the third list target.
+  run frontmatter_value "$COMMANDS_DIR/list.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ask"* ]]
+}
+
+@test "commands/list.md body mentions the ask filter" {
+  # Task 5: the body explains ask as a --list filter value.
+  run grep -q 'ask' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/list.md body includes a --list ask example" {
+  run grep -q 'passthru:list --list ask' "$COMMANDS_DIR/list.md"
+  [ "$status" -eq 0 ]
+}
+
 @test "commands/list.md body mentions list.sh" {
   run grep -q "list.sh" "$COMMANDS_DIR/list.md"
   [ "$status" -eq 0 ]
@@ -481,6 +535,17 @@ frontmatter_value() {
   [[ "$output" == *"index"* ]]
 }
 
+@test "commands/remove.md body mentions ask as a valid list value" {
+  # Task 5: remove accepts ask as a list argument alongside allow/deny.
+  run grep -q 'ask' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/remove.md body includes a worked ask example" {
+  run grep -q 'passthru:remove user ask' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
 @test "commands/remove.md body mentions remove-rule.sh" {
   run grep -q "remove-rule.sh" "$COMMANDS_DIR/remove.md"
   [ "$status" -eq 0 ]
@@ -514,6 +579,68 @@ frontmatter_value() {
   run grep -q 'Exit 1' "$COMMANDS_DIR/remove.md"
   [ "$status" -eq 0 ]
   run grep -q 'Exit 2' "$COMMANDS_DIR/remove.md"
+  [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Tests - commands/overlay.md (Task 9)
+# ---------------------------------------------------------------------------
+
+@test "commands/overlay.md exists" {
+  [ -f "$COMMANDS_DIR/overlay.md" ]
+}
+
+@test "commands/overlay.md has frontmatter delimiters" {
+  run extract_frontmatter "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md frontmatter has non-empty description" {
+  run frontmatter_value "$COMMANDS_DIR/overlay.md" "description"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/overlay.md frontmatter has non-empty argument-hint" {
+  run frontmatter_value "$COMMANDS_DIR/overlay.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+}
+
+@test "commands/overlay.md frontmatter argument-hint mentions --enable, --disable, --status" {
+  run frontmatter_value "$COMMANDS_DIR/overlay.md" "argument-hint"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--enable"* ]]
+  [[ "$output" == *"--disable"* ]]
+  [[ "$output" == *"--status"* ]]
+}
+
+@test "commands/overlay.md body mentions overlay-config.sh" {
+  run grep -q "overlay-config.sh" "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body mentions CLAUDE_PLUGIN_ROOT" {
+  run grep -q 'CLAUDE_PLUGIN_ROOT' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body mentions \$ARGUMENTS pass-through" {
+  run grep -q 'ARGUMENTS' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body mentions the sentinel path" {
+  run grep -q 'passthru.overlay.disabled' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "commands/overlay.md body includes worked examples for each flag" {
+  run grep -q 'passthru:overlay --enable' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'passthru:overlay --disable' "$COMMANDS_DIR/overlay.md"
+  [ "$status" -eq 0 ]
+  run grep -q 'passthru:overlay --status' "$COMMANDS_DIR/overlay.md"
   [ "$status" -eq 0 ]
 }
 

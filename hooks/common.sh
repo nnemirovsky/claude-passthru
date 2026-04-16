@@ -288,6 +288,185 @@ emit_passthrough() {
 }
 
 # ---------------------------------------------------------------------------
+# Overlay + permission-mode helpers
+# ---------------------------------------------------------------------------
+#
+# These helpers are consumed by the PreToolUse hook in the Task 8 wiring so
+# the same detection logic lives in one place (rather than drifting between
+# the hook and `scripts/overlay.sh`). Keeping them in common.sh also makes
+# them easy to unit test without spawning a whole hook invocation.
+
+# overlay_disabled: returns 0 if the opt-out sentinel
+# `~/.claude/passthru.overlay.disabled` exists, 1 otherwise. Honors
+# PASSTHRU_USER_HOME so bats tests can plant / remove the sentinel freely.
+overlay_disabled() {
+  local sentinel
+  sentinel="$(passthru_user_home)/.claude/passthru.overlay.disabled"
+  [ -e "$sentinel" ]
+}
+
+# detect_overlay_multiplexer: internal detection shared with scripts/overlay.sh.
+# Emits one of `tmux` / `kitty` / `wezterm` on stdout when a candidate env var
+# is set AND its binary is on PATH. Returns 0 on success, 1 when nothing is
+# usable (empty stdout).
+#
+# Order of preference matches scripts/overlay.sh exactly: tmux -> kitty ->
+# wezterm. Both call sites (the hook via overlay_available and overlay.sh
+# via its own detect_multiplexer) need to agree or the hook would claim the
+# overlay is usable when overlay.sh would then refuse to launch.
+detect_overlay_multiplexer() {
+  if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    printf 'tmux'
+    return 0
+  fi
+  if [ -n "${KITTY_WINDOW_ID:-}" ] && command -v kitty >/dev/null 2>&1; then
+    printf 'kitty'
+    return 0
+  fi
+  if [ -n "${WEZTERM_PANE:-}" ] && command -v wezterm >/dev/null 2>&1; then
+    printf 'wezterm'
+    return 0
+  fi
+  printf ''
+  return 1
+}
+
+# overlay_available: returns 0 if at least one supported multiplexer is both
+# announced (via env var) AND has its binary on PATH. Thin wrapper around
+# detect_overlay_multiplexer for readable hook decision sites.
+overlay_available() {
+  local mux
+  mux="$(detect_overlay_multiplexer 2>/dev/null || true)"
+  [ -n "$mux" ]
+}
+
+# permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>
+#
+# Returns 0 if Claude Code itself would auto-allow this tool call in the given
+# permission mode, 1 otherwise.
+#
+# This is a *best-effort replication* of CC's internal
+# src/utils/permissions/pathValidation.ts + per-tool auto-allow checkers. It
+# is intentionally conservative: we err toward prompting the user (overlay
+# path) rather than auto-allowing. Divergences (all in the SAFER direction):
+#   - Symlink resolution: we use literal prefix match on "$cwd/". CC uses
+#     realpathSync + pathInWorkingPath which follows symlinks. A symlink
+#     `$cwd/link -> /elsewhere/foo` that CC would auto-allow via the real
+#     path is NOT auto-allowed here (it falls through to overlay).
+#   - `..` traversal: any path containing `/../` is rejected outright, even
+#     when its literal prefix starts with $cwd/. CC's containsPathTraversal
+#     covers this via path normalization.
+#   - additionalAllowedWorkingDirs / sandbox allowlists / CC's internal
+#     scratchpad paths: not considered. Calls to those dirs fall through.
+#
+# Mode behavior:
+#   bypassPermissions: always 0 (everything auto-allowed).
+#   acceptEdits:      0 for Write/Edit/NotebookEdit/MultiEdit when the
+#                     target file_path resolves inside cwd. Non-edit tools
+#                     in acceptEdits return 1.
+#   default (+ empty mode value): 0 for read-only tools
+#                     (Read/Grep/Glob/NotebookRead/LS) when the target path
+#                     is inside cwd. Everything else returns 1, including
+#                     WebFetch/WebSearch (user is prompted via the overlay
+#                     or native dialog; `ask[]` rules can opt specific hosts
+#                     in).
+#   plan:             0 for Read/Grep/Glob/NotebookRead/LS (read-only,
+#                     mutating tools are blocked by plan mode anyway). 1
+#                     for any mutating tool.
+#   Unknown mode:     1 (fail-safe: run the overlay).
+# _pm_path_inside_cwd: return 0 when path is literally inside cwd and free of
+# ../ traversal. We do NOT canonicalize paths, so a symlink inside cwd
+# pointing outside cwd still passes - documented as a known limitation.
+#
+# Hoisted out of permission_mode_auto_allows so it is defined once per shell
+# rather than re-defined on every tool call.
+_pm_path_inside_cwd() {
+  local p="$1" c="$2"
+  [ -z "$p" ] && return 1
+  [ -z "$c" ] && return 1
+  # Reject `..` traversal anywhere in the path (including the middle).
+  case "$p" in
+    *'/../'*|*'/..') return 1 ;;
+  esac
+  # Literal prefix check: path must start with "$cwd/" (not just "$cwd").
+  case "$p" in
+    "$c"/*) return 0 ;;
+  esac
+  return 1
+}
+
+permission_mode_auto_allows() {
+  local mode="$1" tool_name="$2" tool_input="$3" cwd="$4"
+
+  # A bypassPermissions session auto-allows every tool call - mirror that.
+  if [ "$mode" = "bypassPermissions" ]; then
+    return 0
+  fi
+
+  # Empty string / unset mode is treated as "default".
+  [ -z "$mode" ] && mode="default"
+
+  case "$mode" in
+    acceptEdits)
+      case "$tool_name" in
+        Write|Edit|NotebookEdit|MultiEdit)
+          local fp
+          fp="$(jq -r '.file_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          if _pm_path_inside_cwd "$fp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    default)
+      case "$tool_name" in
+        Read|NotebookRead)
+          local fp
+          fp="$(jq -r '.file_path // .notebook_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          if _pm_path_inside_cwd "$fp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        Grep|Glob|LS)
+          local gp
+          gp="$(jq -r '.path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
+          # Grep/Glob/LS without a path default to cwd - auto-allow that.
+          if [ -z "$gp" ]; then
+            return 0
+          fi
+          if _pm_path_inside_cwd "$gp" "$cwd"; then
+            return 0
+          fi
+          return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    plan)
+      case "$tool_name" in
+        Read|Grep|Glob|NotebookRead|LS)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      # Unknown mode (e.g. future CC addition). Fail-safe: run the overlay.
+      return 1
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # Post-hook classification helpers
 # ---------------------------------------------------------------------------
 #
@@ -612,10 +791,16 @@ passthru_project_imported_path() {
 # Malformed JSON fails with the offending path on stderr and non-zero return.
 #
 # Output: a single merged JSON object on stdout of the form
-#   { "version": 1, "allow": [...], "deny": [...] }
-# where allow[] and deny[] are concatenated in this fixed order:
+#   { "version": 2, "allow": [...], "deny": [...], "ask": [...] }
+# where allow[], deny[], and ask[] are concatenated in this fixed order:
 #   user-authored, user-imported, project-authored, project-imported.
 # Ordering matters for shadowing reports and for first-match semantics.
+#
+# Schema v1 files contribute no ask[] entries (the ask[] key is v2-only).
+# Schema v2 files may declare an ask[] array at the top level; v1 files
+# that happen to contain ask[] have it ignored here (load_rules reads
+# allow[] and deny[] only for v1). The merged document always emits
+# version 2 because it is a strict superset of v1.
 load_rules() {
   local files=()
   local p
@@ -630,7 +815,9 @@ load_rules() {
   done
 
   # Normalize each file: missing/empty -> {}, malformed -> error.
-  # Each element becomes a JSON object with .allow[] and .deny[] (possibly empty).
+  # Each element becomes a JSON object with .allow[], .deny[], and .ask[]
+  # (possibly empty). For v1 files, .ask[] is always dropped to empty so
+  # downstream consumers never see ask rules from v1 sources.
   local tmpdir
   tmpdir="$(mktemp -d -t passthru-load.XXXXXX)" || return 1
   # shellcheck disable=SC2064
@@ -650,19 +837,28 @@ load_rules() {
       printf '[ERR] failed to parse %s: %s\n' "$f" "$(cat "${tmpdir}/err")" >&2
       return 2
     fi
-    # Normalize: ensure .allow and .deny exist as arrays.
-    if ! jq '{ version: (.version // 1), allow: (.allow // []), deny: (.deny // []) }' \
-        "$f" > "${tmpdir}/${idx}.json" 2>"${tmpdir}/err"; then
+    # Normalize: ensure .allow, .deny, and .ask exist as arrays.
+    # For v1 files, .ask is always reset to [] since ask[] is a v2-only key.
+    if ! jq '
+      . as $d
+      | (.version // 1) as $v
+      | {
+          version: $v,
+          allow: (.allow // []),
+          deny: (.deny // []),
+          ask: (if $v >= 2 then (.ask // []) else [] end)
+        }
+    ' "$f" > "${tmpdir}/${idx}.json" 2>"${tmpdir}/err"; then
       printf '[ERR] failed to normalize %s: %s\n' "$f" "$(cat "${tmpdir}/err")" >&2
       return 2
     fi
     idx=$((idx + 1))
   done
 
-  # Merge: concat allow[] and deny[] across all inputs, preserve order.
+  # Merge: concat allow[], deny[], and ask[] across all inputs, preserve order.
   # If no files at all, emit empty skeleton.
   if [ "$idx" -eq 0 ]; then
-    printf '{"version":1,"allow":[],"deny":[]}\n'
+    printf '{"version":2,"allow":[],"ask":[],"deny":[]}\n'
     return 0
   fi
 
@@ -673,10 +869,85 @@ load_rules() {
   done
 
   jq -s '{
-    version: 1,
+    version: 2,
     allow: ([.[].allow // []] | add),
-    deny: ([.[].deny // []] | add)
+    deny: ([.[].deny // []] | add),
+    ask: ([.[].ask // []] | add)
   }' "${inputs[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# build_ordered_allow_ask
+# ---------------------------------------------------------------------------
+#
+# Emit a JSON array of {list, merged_idx, rule} objects that walks allow[]
+# and ask[] rules across the four rule files in DOCUMENT ORDER:
+#   1. Scope order is fixed: user-authored -> user-imported ->
+#      project-authored -> project-imported.
+#   2. Within each file, the relative order between allow[] and ask[] is
+#      taken from JSON key order (keys_unsorted). A file with
+#      {"ask":[...], "allow":[...]} walks ask rules first; a file with
+#      {"allow":[...], "ask":[...]} walks allow rules first.
+#   3. Within each array, rules are walked in their JSON array order.
+#
+# The `merged_idx` field matches the rule's position in the merged allow[]
+# or ask[] array that load_rules would produce. Keeps audit-log rule_index
+# values consistent with `/passthru:list` output regardless of which path
+# (allow-first vs ask-first) a given file takes.
+#
+# v1 files contribute no ask rules (matches load_rules' v1 handling).
+# Missing files, empty files, and files with only a subset of keys are all
+# handled gracefully; this function is silent (never prints diagnostics).
+# On jq error (corrupt JSON already rejected by load_rules upstream) the
+# function emits an empty array.
+build_ordered_allow_ask() {
+  local raw_files=()
+  local p
+  for p in \
+    "$(passthru_user_authored_path)" \
+    "$(passthru_user_imported_path)" \
+    "$(passthru_project_authored_path)" \
+    "$(passthru_project_imported_path)"; do
+    if [ -f "$p" ] && [ -s "$p" ]; then
+      raw_files+=("$p")
+    fi
+  done
+
+  if [ "${#raw_files[@]}" -eq 0 ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # Feed the raw files as a single slurp so jq sees the ORIGINAL key order
+  # (load_rules would normalize keys alphabetically and lose it). Invalid
+  # JSON has already been flagged by load_rules; here we fall back to [].
+  jq -s -c '
+    . as $files
+    | reduce range(0; $files | length) as $fi
+        ({entries: [], allow_idx: 0, ask_idx: 0};
+          . as $acc
+          | ($files[$fi] // {}) as $doc
+          | (($doc.version // 1)) as $ver
+          | ($doc
+             | keys_unsorted
+             | map(select(. == "allow" or . == "ask"))
+             # v1 files never contribute ask rules.
+             | map(select(. == "allow" or $ver >= 2))) as $order
+          | reduce $order[] as $key ($acc;
+              . as $a2
+              | ($doc[$key] // []) as $list
+              | reduce range(0; $list | length) as $ri ($a2;
+                  if $key == "allow"
+                  then .entries += [{list: "allow", rule: $list[$ri], merged_idx: .allow_idx}]
+                       | .allow_idx += 1
+                  else .entries += [{list: "ask", rule: $list[$ri], merged_idx: .ask_idx}]
+                       | .ask_idx += 1
+                  end
+                )
+            )
+        )
+    | .entries
+  ' "${raw_files[@]}" 2>/dev/null || printf '[]\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -685,13 +956,20 @@ load_rules() {
 #
 # Usage: validate_rules <merged-json>
 # Enforces:
-#   - top-level .version is 1 (if present, must be 1; absent = ok, merged output always sets 1)
+#   - top-level .version is 1 or 2 (absent = ok, merged output always sets 2)
 #   - .allow and .deny are arrays (possibly empty)
+#   - on v2 only, .ask is an array (possibly empty)
 #   - each rule object has at least one of "tool" or "match"
 #   - if present, .tool is a non-empty string
 #   - if present, .match is an object and every value is a non-empty string
 # Does NOT compile-check PCRE at load time (per plan: deep regex checks live in verify.sh).
 # Returns 0 if valid, nonzero with stderr message otherwise.
+#
+# Schema evolution: v1 files may still be in the wild. load_rules always emits
+# v2 (since v2 is a strict superset), so validate_rules on loader output always
+# sees version 2. When called on a raw v1 source file, validate_rules ignores
+# any ask[] key (v1 does not recognize it). On v2, ask[] is validated using
+# the same rule-shape validation as allow[] and deny[].
 validate_rules() {
   local merged="$1"
   if [ -z "$merged" ]; then
@@ -699,11 +977,11 @@ validate_rules() {
     return 2
   fi
 
-  # Version check: if .version is present and not 1, reject.
+  # Version check: accept 1 or 2; reject anything else.
   local ver
   ver="$(jq -r '.version // 1' <<<"$merged" 2>/dev/null)"
-  if [ "$ver" != "1" ]; then
-    printf '[ERR] unsupported rule schema version: %s (expected 1)\n' "$ver" >&2
+  if [ "$ver" != "1" ] && [ "$ver" != "2" ]; then
+    printf '[ERR] unsupported rule schema version: %s (expected 1 or 2)\n' "$ver" >&2
     return 2
   fi
 
@@ -721,9 +999,21 @@ validate_rules() {
     return 2
   fi
 
-  # Per-rule schema checks for both arrays.
+  # On v2, also ensure .ask (if present) is an array.
+  if [ "$ver" = "2" ]; then
+    local ask_type
+    ask_type="$(jq -r '.ask | type' <<<"$merged" 2>/dev/null)"
+    if [ "$ask_type" != "array" ] && [ "$ask_type" != "null" ]; then
+      printf '[ERR] .ask must be an array, got %s\n' "$ask_type" >&2
+      return 2
+    fi
+  fi
+
+  # Per-rule schema checks for allow[], deny[], and (on v2) ask[].
+  # We pass the version as a jq arg so the same filter handles both schemas:
+  # v2 walks ask[] too, v1 never does.
   local report
-  report="$(jq -r '
+  report="$(jq -r --arg ver "$ver" '
     def check_rule(list_name):
       . as $entry
       | $entry.key as $i
@@ -752,7 +1042,10 @@ validate_rules() {
          else empty end);
 
     ( (.allow // []) | to_entries[] | check_rule("allow") ),
-    ( (.deny  // []) | to_entries[] | check_rule("deny") )
+    ( (.deny  // []) | to_entries[] | check_rule("deny") ),
+    ( if $ver == "2" then
+        ( (.ask // []) | to_entries[] | check_rule("ask") )
+      else empty end )
   ' <<<"$merged" 2>/dev/null)"
 
   # jq's `to_entries` numbering requires capturing index; the construction above

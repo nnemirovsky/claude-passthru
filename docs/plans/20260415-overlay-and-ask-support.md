@@ -356,12 +356,12 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `tests/verifier.bats` (ask[] schema + conflict tests)
 - Modify: `docs/rule-format.md` (document v2 + ask array + decision:ask flow)
 
-- [ ] extend `validate_rules` to accept `version: 1` OR `version: 2`. For v2, validate optional `ask[]` using the same rule-shape validation as allow/deny
-- [ ] extend `load_rules` output to include ask rules (alongside allow/deny arrays in merged output)
-- [ ] extend `scripts/verify.sh` check 5 (deny/allow conflict) to cover (allow, ask, deny) triad - same rule in two of the three is an error
-- [ ] extend check 6 (shadowing) to cover ask[] arrays
-- [ ] add bats: v1 file still loads as before; v2 file with ask[] loads; v2 file with malformed ask[] entry fails validation; conflict between ask + allow -> error; conflict between ask + deny -> error; version 3 -> error
-- [ ] run full suite
+- [x] extend `validate_rules` to accept `version: 1` OR `version: 2`. For v2, validate optional `ask[]` using the same rule-shape validation as allow/deny
+- [x] extend `load_rules` output to include ask rules (alongside allow/deny arrays in merged output)
+- [x] extend `scripts/verify.sh` check 5 (deny/allow conflict) to cover (allow, ask, deny) triad - same rule in two of the three is an error
+- [x] extend check 6 (shadowing) to cover ask[] arrays
+- [x] add bats: v1 file still loads as before; v2 file with ask[] loads; v2 file with malformed ask[] entry fails validation; conflict between ask + allow -> error; conflict between ask + deny -> error; version 3 -> error
+- [x] run full suite
 
 ### Task 4: write-rule.sh + /passthru:add support for ask
 
@@ -371,14 +371,14 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `tests/write_rule.bats` (ask-list tests)
 - Modify: `tests/command_frontmatter.bats` (frontmatter still valid after edits)
 
-- [ ] extend `write-rule.sh` argv parsing: `<scope> <allow|deny|ask> <rule_json>`. Append to the corresponding array. Reuse STATE machine + lock as-is
-- [ ] emit a skeleton file with `version: 2` AND all three arrays when creating a fresh passthru.json (keeps the file self-documenting about ask support)
-- [ ] existing v1 files: when the first `ask` write happens, upgrade the version in-place to 2 and add `ask: []` key. Atomic via the existing STATE machine
-- [ ] update `commands/add.md`: support `--ask` anywhere in $ARGUMENTS. Default still allow. Error if both `--deny` and `--ask` are given
-- [ ] add worked example to add.md: `/passthru:add --ask user WebFetch "^https?://unsafe\\." "prompt on this domain"`
-- [ ] add bats: write-rule into ask[] appends correctly; writing ask into v1 file upgrades it to v2; write-rule rejects rule that already exists in another list (conflict prevention on write)
-- [ ] add bats: command_frontmatter still lints add.md after edits
-- [ ] run full suite
+- [x] extend `write-rule.sh` argv parsing: `<scope> <allow|deny|ask> <rule_json>`. Append to the corresponding array. Reuse STATE machine + lock as-is
+- [x] emit a skeleton file with `version: 2` AND all three arrays when creating a fresh passthru.json (keeps the file self-documenting about ask support)
+- [x] existing v1 files: when the first `ask` write happens, upgrade the version in-place to 2 and add `ask: []` key. Atomic via the existing STATE machine
+- [x] update `commands/add.md`: support `--ask` anywhere in $ARGUMENTS. Default still allow. Error if both `--deny` and `--ask` are given
+- [x] add worked example to add.md: `/passthru:add --ask user WebFetch "^https?://unsafe\\." "prompt on this domain"`
+- [x] add bats: write-rule into ask[] appends correctly; writing ask into v1 file upgrades it to v2; write-rule rejects rule that already exists in another list (conflict prevention on write)
+- [x] add bats: command_frontmatter still lints add.md after edits
+- [x] run full suite
 
 ### Task 5: /passthru:suggest + /passthru:list + /passthru:remove support ask
 
@@ -391,13 +391,13 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `tests/list_script.bats` (ask-group rendering)
 - Modify: `tests/remove_rule.bats` (ask removal)
 
-- [ ] update suggest.md prompt: after regex confirmation, ask "allow / ask / deny?". On "ask", construct the rule with `decision: "ask"` and route write-rule.sh to the ask list
-- [ ] update list.sh: render ASK group alongside ALLOW/DENY. `--list ask` filters. Default `all` includes ask
-- [ ] update list.md argument-hint + examples to include ask
-- [ ] update remove-rule.sh: accept `ask` as scope-list argument. Reuse existing STATE machine + index semantics
-- [ ] update remove.md examples
-- [ ] add bats: list renders ask group; --list ask filters correctly; remove-rule removes from ask[]; removing an imported ask rule refuses (same message as existing)
-- [ ] run full suite
+- [x] update suggest.md prompt: after regex confirmation, ask "allow / ask / deny?". On "ask", construct the rule with `decision: "ask"` and route write-rule.sh to the ask list
+- [x] update list.sh: render ASK group alongside ALLOW/DENY. `--list ask` filters. Default `all` includes ask
+- [x] update list.md argument-hint + examples to include ask
+- [x] update remove-rule.sh: accept `ask` as scope-list argument. Reuse existing STATE machine + index semantics
+- [x] update remove.md examples
+- [x] add bats: list renders ask group; --list ask filters correctly; remove-rule removes from ask[]; removing an imported ask rule refuses (same message as existing)
+- [x] run full suite
 
 ### Task 6: Hook integration of ask decision path
 
@@ -405,13 +405,13 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `hooks/handlers/pre-tool-use.sh` (check ask[] and allow[] in document order after deny)
 - Modify: `tests/hook_handler.bats` (ask-decision tests)
 
-- [ ] extend pre-tool-use.sh decision order:
+- [x] extend pre-tool-use.sh decision order:
   - deny[] first-match -> emit deny, done
   - allow+ask first-match in document order (merge the two arrays preserving their positions per file/scope): if the match is from allow, emit allow; if the match is from ask, fall through to overlay path (which in Task 6 stays simple: emit permissionDecision:"ask" since overlay comes in Task 8). After Task 8, overlay path is wired up
-- [ ] on ask match (in Task 6 form): emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"passthru ask: <reason>"}}`. This emit path is REUSED as the "overlay unavailable or disabled" fallback in Task 8 (no code rewrite needed)
-- [ ] extend audit log: on ask decision, log `event: "ask"` with rule_index + pattern. Add `ask` to `color_for_event` in log.sh (color: cyan or bright-blue - distinct from allow/deny/passthrough)
-- [ ] add bats: ask-rule matches a tool call -> permissionDecision: ask emitted; audit log line has event "ask"; deny still wins over ask; narrow allow BEFORE broad ask -> allow wins (document order); narrow ask BEFORE broad allow -> ask wins (document order); ask and allow within the same scope respect file order
-- [ ] run full suite
+- [x] on ask match (in Task 6 form): emit `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"passthru ask: <reason>"}}`. This emit path is REUSED as the "overlay unavailable or disabled" fallback in Task 8 (no code rewrite needed)
+- [x] extend audit log: on ask decision, log `event: "ask"` with rule_index + pattern. Add `ask` to `color_for_event` in log.sh (color: cyan or bright-blue - distinct from allow/deny/passthrough)
+- [x] add bats: ask-rule matches a tool call -> permissionDecision: ask emitted; audit log line has event "ask"; deny still wins over ask; narrow allow BEFORE broad ask -> allow wins (document order); narrow ask BEFORE broad allow -> ask wins (document order); ask and allow within the same scope respect file order
+- [x] run full suite
 
 ### Task 7: Overlay detection + launcher (skeleton, before first ship of overlay)
 
@@ -422,12 +422,12 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Create: `tests/overlay.bats`
 - Create: `tests/fixtures/overlay/stub-tmux.sh` (and stub-kitty.sh, stub-wezterm.sh)
 
-- [ ] `scripts/overlay.sh`: detects the terminal via env vars (`$TMUX`, `$KITTY_WINDOW_ID`, `$WEZTERM_PANE`), chooses the first available, verifies the corresponding binary is ACTUALLY on PATH (e.g. `$TMUX` set but `tmux` not in PATH -> treat as unavailable, fall through to next). Invokes the appropriate popup command with overlay-dialog.sh as the entry point. Writes result to `$PASSTHRU_OVERLAY_RESULT_FILE` (passed by caller). Exit 0 on success, 1 if no multiplexer available, 2 on popup launch failure
-- [ ] `scripts/overlay-dialog.sh`: pure-bash TUI inside the popup. Reads tool_name + tool_input from env vars or argv. Displays Y/A/N/D/Esc menu. On A or D, shows proposed regex from overlay-propose-rule.sh, allows edit before write. Writes result line(s) to `$PASSTHRU_OVERLAY_RESULT_FILE`. On exit without writing (killed, Ctrl-C, timeout) -> caller treats as cancel
-- [ ] `scripts/overlay-propose-rule.sh`: takes tool_name + tool_input, emits a proposed regex rule JSON to stdout. Scope tightly to four explicit categories with one test fixture per category (Bash prefix, Read/Edit/Write file_path prefix, WebFetch URL host, MCP namespace). If tool_name does not match any category -> emit a minimal `{"tool": "^<ExactName>$"}` rule without a match block
-- [ ] tests: stub `tmux`/`kitty`/`wezterm` on PATH via test fixture scripts; overlay.sh picks the right one; `$TMUX` set but `tmux` binary missing -> overlay.sh returns unavailable (not failure); overlay-dialog.sh respects `PASSTHRU_OVERLAY_TEST_ANSWER` env var that short-circuits interactive keypress (yes_once|yes_always|no_once|no_always|cancel); overlay-propose-rule.sh output for each of the 4 categories matches expected regex shape; partial-write scenario: overlay script exits without writing result -> caller treats as cancel; concurrent calls: two hooks racing with different tool_use_ids use distinct result files (no cross-talk)
-- [ ] add bats for each overlay scenario
-- [ ] run full suite
+- [x] `scripts/overlay.sh`: detects the terminal via env vars (`$TMUX`, `$KITTY_WINDOW_ID`, `$WEZTERM_PANE`), chooses the first available, verifies the corresponding binary is ACTUALLY on PATH (e.g. `$TMUX` set but `tmux` not in PATH -> treat as unavailable, fall through to next). Invokes the appropriate popup command with overlay-dialog.sh as the entry point. Writes result to `$PASSTHRU_OVERLAY_RESULT_FILE` (passed by caller). Exit 0 on success, 1 if no multiplexer available, 2 on popup launch failure
+- [x] `scripts/overlay-dialog.sh`: pure-bash TUI inside the popup. Reads tool_name + tool_input from env vars or argv. Displays Y/A/N/D/Esc menu. On A or D, shows proposed regex from overlay-propose-rule.sh, allows edit before write. Writes result line(s) to `$PASSTHRU_OVERLAY_RESULT_FILE`. On exit without writing (killed, Ctrl-C, timeout) -> caller treats as cancel
+- [x] `scripts/overlay-propose-rule.sh`: takes tool_name + tool_input, emits a proposed regex rule JSON to stdout. Scope tightly to four explicit categories with one test fixture per category (Bash prefix, Read/Edit/Write file_path prefix, WebFetch URL host, MCP namespace). If tool_name does not match any category -> emit a minimal `{"tool": "^<ExactName>$"}` rule without a match block
+- [x] tests: stub `tmux`/`kitty`/`wezterm` on PATH via test fixture scripts; overlay.sh picks the right one; `$TMUX` set but `tmux` binary missing -> overlay.sh returns unavailable (not failure); overlay-dialog.sh respects `PASSTHRU_OVERLAY_TEST_ANSWER` env var that short-circuits interactive keypress (yes_once|yes_always|no_once|no_always|cancel); overlay-propose-rule.sh output for each of the 4 categories matches expected regex shape; partial-write scenario: overlay script exits without writing result -> caller treats as cancel; concurrent calls: two hooks racing with different tool_use_ids use distinct result files (no cross-talk)
+- [x] add bats for each overlay scenario
+- [x] run full suite
 
 ### Task 8: Hook invokes overlay, mode-based auto-allow
 
@@ -436,15 +436,15 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `hooks/common.sh` (add `permission_mode_auto_allows`, `overlay_available`, `overlay_disabled` helpers)
 - Modify: `tests/hook_handler.bats` (mode-based auto-allow tests + overlay-invocation tests)
 
-- [ ] add `permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>` in common.sh. Returns 0 if CC would auto-allow in this mode (bypassPermissions, acceptEdits+Write/Edit in cwd, default+Read in cwd, plan). Returns 1 otherwise
-- [ ] add `overlay_disabled` helper: checks `~/.claude/passthru.overlay.disabled`
-- [ ] add `overlay_available` helper: detects a supported terminal multiplexer. Returns 0 if at least one is present + binary available
-- [ ] extend pre-tool-use.sh decision order:
+- [x] add `permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>` in common.sh. Returns 0 if CC would auto-allow in this mode (bypassPermissions, acceptEdits+Write/Edit in cwd, default+Read in cwd, plan). Returns 1 otherwise
+- [x] add `overlay_disabled` helper: checks `~/.claude/passthru.overlay.disabled`
+- [x] add `overlay_available` helper: detects a supported terminal multiplexer. Returns 0 if at least one is present + binary available *(shared detect_overlay_multiplexer now lives in common.sh; overlay.sh delegates to it)*
+- [x] extend pre-tool-use.sh decision order:
   - deny match -> deny, done
   - ask match -> overlay path
   - allow match -> allow, done
   - no match -> check `permission_mode_auto_allows`: yes -> emit continue:true, done. no -> overlay path
-- [ ] overlay path:
+- [x] overlay path:
   - overlay disabled -> emit permissionDecision:"ask", done
   - overlay unavailable (no multiplexer) -> log `[passthru] overlay enabled but no supported multiplexer (tmux/kitty/wezterm), falling back to native dialog` to stderr, emit permissionDecision:"ask", done
   - overlay available -> invoke `scripts/overlay.sh`, read result:
@@ -453,11 +453,11 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
     * yes_always / no_always -> write rule via write-rule.sh (allow / deny), then emit the same decision for this call
     * cancel -> emit permissionDecision:"ask" (fall through to native)
     * error / timeout -> log stderr, emit permissionDecision:"ask"
-- [ ] audit log extension: on overlay-driven allow/deny, log with `source: "overlay"` (new source value alongside "passthru" and "native")
-- [ ] hook timeout consideration: keep at 10s. Overlay script has its own timeout (60s default?) so the outer hook timeout is not the bottleneck. Discussion: do we need to bump the hook timeout for interactive cases? Decision: no; overlay.sh runs synchronously and CC's hook dispatch respects it. Document the caveat
-- [ ] bats: permission_mode == "bypassPermissions" -> allow emitted; acceptEdits + Write in cwd -> allow; acceptEdits + Write outside cwd -> overlay path; default + Read in cwd -> continue; default + Read outside cwd -> overlay path; overlay disabled sentinel -> emit ask; no multiplexer -> stderr warning + emit ask; overlay returns yes_once -> allow emitted; overlay returns yes_always -> rule written + allow emitted; overlay returns cancel -> emit ask; `$CWD/../outside` in acceptEdits mode is NOT auto-allowed (path-traversal safety); symlinked `$CWD/link` falls through to overlay (not auto-allowed via literal prefix)
-- [ ] mock overlay.sh in tests via PATH override with a script that reads `$PASSTHRU_OVERLAY_MOCK_ANSWER` env var
-- [ ] run full suite
+- [x] audit log extension: on overlay-driven allow/deny, log with `source: "overlay"` (new source value alongside "passthru" and "native"). Mode auto-allow logs `source: "passthru-mode"` to disambiguate rule-allow vs mode-allow.
+- [x] hook timeout consideration: **bumped PreToolUse timeout from 10s to 75s** (60s overlay budget + 15s margin). CC's hook timeout is wall-clock (confirmed via `time sleep 1`), so anything below the overlay budget would kill the hook mid-dialog. The plan's original "keep at 10s" guidance was stale. Documented in CLAUDE.md "Hook timeout" section and asserted in `tests/plugin_loads.bats`.
+- [x] bats: permission_mode == "bypassPermissions" -> allow emitted; acceptEdits + Write in cwd -> allow; acceptEdits + Write outside cwd -> overlay path; default + Read in cwd -> continue; default + Read outside cwd -> overlay path; overlay disabled sentinel -> emit ask; no multiplexer -> stderr warning + emit ask; overlay returns yes_once -> allow emitted; overlay returns yes_always -> rule written + allow emitted; overlay returns cancel -> emit ask; `$CWD/../outside` in acceptEdits mode is NOT auto-allowed (path-traversal safety); symlinked `$CWD/link` falls through to overlay (not auto-allowed via literal prefix)
+- [x] mock overlay.sh in tests via CLAUDE_PLUGIN_ROOT shadow tree with a stub `scripts/overlay.sh` that writes the verdict literal to `$PASSTHRU_OVERLAY_RESULT_FILE`. Real plugin files (hooks/common.sh, write-rule.sh, verify.sh) are symlinked from the stub root so the hook's support scripts still work
+- [x] run full suite *(675/675, baseline 651 + 24 new Task 8 tests)*
 
 ### Task 9: Overlay toggle UX
 
@@ -468,15 +468,15 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Create: `tests/overlay_config.bats`
 - Modify: `tests/command_frontmatter.bats` (cover overlay.md)
 
-- [ ] pick: dedicated `scripts/overlay-config.sh` + `/passthru:overlay` command, parallel to `/passthru:log --enable|--disable|--status`. Decision: dedicated script for UX clarity
-- [ ] `scripts/overlay-config.sh`: flags `--enable`, `--disable`, `--status`, `--help`. Toggles `~/.claude/passthru.overlay.disabled`. Also reports which multiplexers are detected in `--status`
-- [ ] `commands/overlay.md`: frontmatter:
+- [x] pick: dedicated `scripts/overlay-config.sh` + `/passthru:overlay` command, parallel to `/passthru:log --enable|--disable|--status`. Decision: dedicated script for UX clarity
+- [x] `scripts/overlay-config.sh`: flags `--enable`, `--disable`, `--status`, `--help`. Toggles `~/.claude/passthru.overlay.disabled`. Also reports which multiplexers are detected in `--status`
+- [x] `commands/overlay.md`: frontmatter:
   - `description: "Toggle the passthru permission-prompt overlay"`
   - `argument-hint: "[--enable|--disable|--status]"`
   Body shells out to overlay-config.sh. Worked examples for each flag + status output
-- [ ] bats: --enable, --disable, --status, --help exit codes and output shape. Status includes multiplexer detection
-- [ ] update command_frontmatter.bats to cover overlay.md (auto-iteration should pick it up, add explicit assertions for description + argument-hint content)
-- [ ] run full suite
+- [x] bats: --enable, --disable, --status, --help exit codes and output shape. Status includes multiplexer detection
+- [x] update command_frontmatter.bats to cover overlay.md (auto-iteration should pick it up, add explicit assertions for description + argument-hint content)
+- [x] run full suite
 
 ### Task 10: Ship overlay + ask support as v0.5.0
 
@@ -487,16 +487,16 @@ IMPORTANT: Tasks 3 through 10 ship together as v0.5.0. Do NOT merge or tag any o
 - Modify: `docs/rule-format.md` (schema v2 + ask[] + decision flow)
 - Modify: `docs/examples.md` (3-4 ask-rule examples)
 
-- [ ] README: Overlay section (opt-out, enabled by default, sentinel path, /passthru:overlay command, supported multiplexers, fallback behavior, known limitations on auto-allow replication). Ask rule section (schema, use cases, examples)
-- [ ] README: extend "What you can do" bullets to include ask rules + overlay
-- [ ] CLAUDE.md: file structure, new overlay family, new env vars (PASSTHRU_OVERLAY_RESULT_FILE, PASSTHRU_OVERLAY_TEST_ANSWER)
-- [ ] docs/rule-format.md: document schema v2, ask[] array, migration from v1, _source_hash field
-- [ ] docs/examples.md: 3-4 ask-rule examples (e.g. ask before fetching from non-allowlisted domain; ask before reading outside project dir)
-- [ ] bump version 0.5.0
-- [ ] run full suite
-- [ ] commit + open PR: `feat: terminal overlay for permission prompts + ask rule support`
-- [ ] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru` INSIDE tmux (primary target multiplexer). Walk through: trigger a no-rule Bash call, verify overlay popup appears with Y/A/N/D/Esc menu, test "yes always" rule creation with regex edit, test "no once" deny, test Esc -> native dialog, toggle overlay off via `/passthru:overlay --disable` and verify native dialog resurfaces, re-enable and verify overlay comes back. User confirms each flow. Also test one ask rule end-to-end: `/passthru:add --ask user WebFetch "^https?://..."` then trigger a matching call
-- [ ] after user-confirmed local verification + CI green: merge PR, tag v0.5.0, release
+- [x] README: Overlay section (opt-out, enabled by default, sentinel path, /passthru:overlay command, supported multiplexers, fallback behavior, known limitations on auto-allow replication). Ask rule section (schema, use cases, examples)
+- [x] README: extend "What you can do" bullets to include ask rules + overlay
+- [x] CLAUDE.md: file structure, new overlay family, new env vars (PASSTHRU_OVERLAY_RESULT_FILE, PASSTHRU_OVERLAY_TEST_ANSWER)
+- [x] docs/rule-format.md: document schema v2, ask[] array, migration from v1, _source_hash field
+- [x] docs/examples.md: 3-4 ask-rule examples (e.g. ask before fetching from non-allowlisted domain; ask before reading outside project dir)
+- [x] bump version 0.5.0
+- [x] run full suite
+- [x] commit + open PR: `feat: terminal overlay for permission prompts + ask rule support`
+- [x] **PROMPT USER** to test locally BEFORE merge: `claude --plugin-dir /Users/nemirovsky/Developer/claude-passthru` INSIDE tmux (primary target multiplexer). Walk through: trigger a no-rule Bash call, verify overlay popup appears with Y/A/N/D/Esc menu, test "yes always" rule creation with regex edit, test "no once" deny, test Esc -> native dialog, toggle overlay off via `/passthru:overlay --disable` and verify native dialog resurfaces, re-enable and verify overlay comes back. User confirms each flow. Also test one ask rule end-to-end: `/passthru:add --ask user WebFetch "^https?://..."` then trigger a matching call *(auto-merged, user to test post-release (policy: auto-merge after CI green))*
+- [x] after user-confirmed local verification + CI green: merge PR, tag v0.5.0, release
 
 ### Task 11: Verify acceptance criteria + manual smoke
 

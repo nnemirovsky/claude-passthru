@@ -1,6 +1,6 @@
 # Rule examples
 
-Real-world passthru rules across `Bash`, `PowerShell`, `Read`, `Edit`, `Write`, `WebFetch`, and MCP tools. Each entry shows the rule JSON, what it matches, and what it does NOT match. Copy-paste into the `allow[]` or `deny[]` array of your `passthru.json`.
+Real-world passthru rules across `Bash`, `PowerShell`, `Read`, `Edit`, `Write`, `WebFetch`, and MCP tools. Each entry shows the rule JSON, what it matches, and what it does NOT match. Copy-paste into the `allow[]`, `deny[]`, or `ask[]` array of your `passthru.json`.
 
 See [`rule-format.md`](rule-format.md) for the full schema reference.
 
@@ -283,9 +283,126 @@ Allow `Edit` but only inside a test file pattern.
 * `/repo/tests/fixtures/rule.json` (wrong extension)
 * `/repo/src/foo.ts` (not under `/tests/`)
 
+## 13. Ask before fetching non-allowlisted domains
+
+Silent-allow the specific domains you trust, but prompt on everything else. Useful when you have a blanket WebFetch allow set elsewhere and want to force eyeballs on out-of-band URLs. Put this in `ask[]`.
+
+```json
+{
+  "tool": "WebFetch",
+  "match": { "url": "^https?://(?!example\\.com)" },
+  "reason": "prompt for non-example-domain URLs"
+}
+```
+
+**Matches (overlay fires).**
+
+* `https://api.github.com/repos/foo/bar`
+* `https://raw.githubusercontent.com/anthropics/claude-code/README.md`
+
+**Does not match (silently proceeds per other rules, or to native dialog).**
+
+* `https://example.com/docs/guide`
+
+Add via:
+
+```
+/passthru:add --ask user WebFetch "^https?://(?!example\\.com)" "prompt for non-example-domain URLs"
+```
+
+This uses a negative-lookahead `(?!example\\.com)`. PCRE (perl) supports lookaheads natively; the verifier checks that your regex compiles in perl so the rule fails loud if you typo the pattern.
+
+## 14. Ask before reading outside the project directory
+
+Prompt before `Read` touches anything under `~/.ssh`. Put this in `ask[]`. Combine with an `allow[]` rule scoped to your workspace for zero-prompt access to the project.
+
+```json
+{
+  "tool": "Read",
+  "match": { "file_path": "^/Users/.*/\\.ssh" },
+  "reason": "prompt before reading anything under .ssh"
+}
+```
+
+**Matches (overlay fires).**
+
+* `/Users/you/.ssh/id_ed25519`
+* `/Users/you/.ssh/config`
+
+**Does not match.**
+
+* `/Users/you/Developer/myproject/README.md`
+* `/etc/ssh/sshd_config` (not under `/Users/.*/.ssh`)
+
+Add via:
+
+```
+/passthru:add --ask user Read "^/Users/.*/\\.ssh" "prompt before reading anything under .ssh"
+```
+
+## 15. Ask on every call to a half-trusted MCP server
+
+You trust `mcp__gemini-cli__*` enough to auto-allow, but a second MCP server is new and you want to audit every call for a while. No `match` block needed; tool-name filter is enough for namespace-scoped prompts.
+
+```json
+{
+  "tool": "^mcp__untrusted__",
+  "reason": "prompt on all calls to the untrusted MCP server"
+}
+```
+
+**Matches (overlay fires).**
+
+* `mcp__untrusted__fetch_data`
+* `mcp__untrusted__update_record`
+
+**Does not match.**
+
+* `mcp__gemini-cli__ask-gemini` (different server)
+* `mcp_untrusted_x` (different prefix)
+
+Add via:
+
+```
+/passthru:add --ask user '^mcp__untrusted__' "prompt on all calls to the untrusted MCP server"
+```
+
+## 16. Narrow allow wins over broad ask (document order)
+
+`allow` and `ask` tie-break by document order within the merged list, not by list name. Put the narrow rule first:
+
+```json
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^git push origin main$" }, "reason": "mainline push is fine" }
+  ],
+  "ask": [
+    { "tool": "Bash", "match": { "command": "^git push" }, "reason": "double-check any other push target" }
+  ]
+}
+```
+
+**Matches (silent allow).**
+
+* `git push origin main` (hits the narrow allow in `allow[]` first)
+
+**Matches (overlay fires on the ask).**
+
+* `git push origin feature/foo`
+* `git push --force origin main`
+
+**Does not match.**
+
+* `git status`
+* `git commit` (falls through to other rules or native dialog)
+
+If you flipped the order (ask declared before allow, broad pattern before narrow), the ask would catch `git push origin main` first and you would get a prompt on every push. Document order is the tie-breaker, so put the rule you want to win higher up in the file.
+
 ## Tips
 
 * **Anchor intentionally.** `^` at the start pins the leading portion. Trailing `$` pins the end. Without anchors the regex matches anywhere in the string.
 * **Escape `.` and `\\s`.** JSON requires double-escaping `\\`. Inside the regex engine `\\.` becomes `\.` and matches a literal dot.
 * **Character classes over wildcards.** Prefer `[^/]+` (one-or-more non-slash) over `.*` in path regex to avoid accidentally spanning path separators.
+* **Ask rules are for prompts, not policy.** Put "always allow" in `allow[]` and "always deny" in `deny[]`. Put "ask me every time" in `ask[]`. Do not use ask as a weak allow. See [`rule-format.md`](rule-format.md#decision-flow) for the full decision flow.
 * **Run `/passthru:suggest` after the fact.** When a permission dialog fires on a call you want to auto-allow later, ask the slash command to draft a rule. It generalizes owner/repo/version variables for you.
