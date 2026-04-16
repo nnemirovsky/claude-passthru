@@ -279,12 +279,9 @@ case "$_display_cwd" in
   "$HOME"/*) _display_cwd="~${_display_cwd#"$HOME"}" ;;
   "$HOME")   _display_cwd="~" ;;
 esac
-# Session label: prefer CC session name (CLAUDE_SESSION_NAME) if set,
-# fall back to tmux window name, then omit.
+# Session label: tmux window name if available, otherwise omit.
 _session_label=""
-if [ -n "${CLAUDE_SESSION_NAME:-}" ]; then
-  _session_label="$CLAUDE_SESSION_NAME"
-elif [ -n "${TMUX:-}" ]; then
+if [ -n "${TMUX:-}" ]; then
   _w="$(tmux display-message -p '#W' 2>/dev/null || true)"
   [ -n "$_w" ] && _session_label="$_w"
 fi
