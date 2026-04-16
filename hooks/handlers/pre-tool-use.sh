@@ -497,12 +497,38 @@ if [ "$MATCHED" != "ask" ]; then
   esac
 fi
 
-# --- 8. Overlay path -------------------------------------------------------
-# Passthru handles ALL non-internal tool calls. There is no mode-based
-# auto-allow shortcut. Every unmatched call goes to the overlay so the user
-# always sees a prompt. CC's native dialog only fires as a fallback when the
-# user explicitly cancels the overlay (Esc) or the overlay is unavailable.
-#
+# --- 8. Mode-based auto-allow -----------------------------------------------
+# Replicate CC's per-mode auto-allow logic within passthru. Calls that CC
+# would silently approve (e.g. Read inside cwd in default mode, Write inside
+# cwd in acceptEdits mode) get an explicit allow from passthru so the overlay
+# does not fire for routine operations. Passthru emits allow (not continue),
+# keeping the decision on our side rather than falling through to CC.
+if [ "$MATCHED" != "ask" ]; then
+  if permission_mode_auto_allows "$PERMISSION_MODE" "$TOOL_NAME" "$TOOL_INPUT" "$CC_CWD" 2>/dev/null; then
+    MSG="passthru mode-allow: ${PERMISSION_MODE:-default}"
+    emit_decision "allow" "$MSG"
+    audit_write_line "allow" "$TOOL_NAME" "mode:${PERMISSION_MODE:-default}" "" "" "$TOOL_USE_ID" "passthru-mode"
+    exit 0
+  fi
+fi
+
+# --- 9. Write tools -> native dialog (for diff rendering) ------------------
+# Write/Edit/NotebookEdit that weren't mode-auto-allowed (step 8) should
+# fall through to CC's native dialog which renders diffs. The overlay can't
+# show diffs, so forcing Esc for every edit is bad UX. An explicit ask-rule
+# match still routes to the overlay (user opted in).
+if [ "$MATCHED" != "ask" ]; then
+  case "$TOOL_NAME" in
+    Write|Edit|NotebookEdit|MultiEdit)
+      emit_decision "ask" "passthru: write tool, deferring to native dialog for diff"
+      audit_write_line "ask" "$TOOL_NAME" "write-tool native fallback" "" "" "$TOOL_USE_ID"
+      audit_write_breadcrumb "$TOOL_USE_ID" "$TOOL_NAME" "$TOOL_INPUT"
+      exit 0
+      ;;
+  esac
+fi
+
+# --- 10. Overlay path ------------------------------------------------------
 # Reached when either:
 #   * an ask[] rule matched, or
 #   * no rule matched AND mode did NOT auto-allow.
