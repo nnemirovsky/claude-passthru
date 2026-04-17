@@ -1083,16 +1083,17 @@ run_handler_in_stub_root() {
   [ "$decision" = "deny" ]
 }
 
-@test "mode: default + WebSearch -> overlay path entered" {
-  setup_overlay_stub "no_once"
+@test "mode: default + WebSearch -> explicit allow (internal tool)" {
   ti='{"query":"what is claude code"}'
   payload="$(make_mode_payload 'WebSearch' "$ti" 'default' "$PROJ_ROOT")"
-  run_handler_in_stub_root "$payload"
+  run_handler "$payload"
   [ "$status" -eq 0 ]
   json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
   [ -n "$json_line" ]
   decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
-  [ "$decision" = "deny" ]
+  [ "$decision" = "allow" ]
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$json_line")"
+  [[ "$reason" == *"passthru internal"* ]]
 }
 
 # Path-traversal safety ------------------------------------------------------

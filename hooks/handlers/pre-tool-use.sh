@@ -345,7 +345,7 @@ fi
 # cannot be affected by broken rule files. ToolSearch and other CC-internal
 # tools stay in the step 7 passthrough list (they use {"continue": true}).
 case "$TOOL_NAME" in
-  Agent|Skill|Glob)
+  Agent|Skill|Glob|WebSearch)
     emit_decision "allow" "passthru internal: ${TOOL_NAME}"
     audit_write_line "allow" "$TOOL_NAME" "passthru internal: ${TOOL_NAME}" "" "" "$TOOL_USE_ID" "passthru-internal"
     exit 0
@@ -751,6 +751,40 @@ export PASSTHRU_OVERLAY_TOOL_NAME="$TOOL_NAME"
 export PASSTHRU_OVERLAY_TOOL_INPUT_JSON="$TOOL_INPUT"
 export PASSTHRU_OVERLAY_CWD="$CC_CWD"
 
+# --- Overlay queue lock -------------------------------------------------------
+# CC can fire multiple PreToolUse hooks concurrently (parallel tool calls).
+# Only one overlay popup can be visible at a time in a given multiplexer.
+# Without serialization, the second+ hook falls through to CC's native dialog.
+# We use a mkdir-based lock to queue concurrent overlay invocations.
+_OVERLAY_LOCK="${_tmpdir}/passthru-overlay.lock.d"
+_OVERLAY_LOCK_TIMEOUT="${PASSTHRU_OVERLAY_LOCK_TIMEOUT:-90}"
+_overlay_lock_acquired=0
+
+_release_overlay_lock() {
+  if [ "$_overlay_lock_acquired" -eq 1 ]; then
+    rm -rf "$_OVERLAY_LOCK" 2>/dev/null || true
+    _overlay_lock_acquired=0
+  fi
+}
+
+# Acquire the lock. Poll at 200ms intervals up to the timeout.
+_lock_start="$(date +%s)"
+while true; do
+  if mkdir "$_OVERLAY_LOCK" 2>/dev/null; then
+    _overlay_lock_acquired=1
+    # Ensure lock is released even on unexpected exits (ERR trap, signals).
+    trap '_release_overlay_lock; printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
+    trap '_release_overlay_lock' EXIT
+    break
+  fi
+  _now="$(date +%s)"
+  if [ $((_now - _lock_start)) -ge "$_OVERLAY_LOCK_TIMEOUT" ]; then
+    printf '[passthru] overlay lock timeout after %ds; falling back to native dialog\n' "$_OVERLAY_LOCK_TIMEOUT" >&2
+    emit_ask_fallback "overlay lock timeout"
+  fi
+  sleep 0.2
+done
+
 # Send a desktop notification so the user knows a permission prompt is waiting.
 # OSC 777 is supported by Ghostty, iTerm2, and other modern terminals.
 printf '\033]777;notify;passthru;permission prompt: %s\a' "$TOOL_NAME" 2>/dev/null || true
@@ -764,7 +798,10 @@ set +e
 bash "$OVERLAY_SH"
 OVERLAY_RC=$?
 set -e
-trap 'printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
+trap '_release_overlay_lock; printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
+
+# Release the lock so the next queued overlay can proceed.
+_release_overlay_lock
 
 if [ "$OVERLAY_RC" -ne 0 ]; then
   # Launch failure (rc 1 = no multiplexer detected at launch time, rc 2 =
