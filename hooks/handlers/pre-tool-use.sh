@@ -751,6 +751,10 @@ export PASSTHRU_OVERLAY_TOOL_NAME="$TOOL_NAME"
 export PASSTHRU_OVERLAY_TOOL_INPUT_JSON="$TOOL_INPUT"
 export PASSTHRU_OVERLAY_CWD="$CC_CWD"
 
+# Send a desktop notification so the user knows a permission prompt is waiting.
+# OSC 777 is supported by Ghostty, iTerm2, and other modern terminals.
+printf '\033]777;notify;passthru;permission prompt: %s\a' "$TOOL_NAME" 2>/dev/null || true
+
 # Invoke the overlay and capture its exit code. We have an ERR trap in place
 # (converts unexpected errors to fail-open passthrough), so we cannot rely on
 # `set +e` alone: the trap fires on any non-zero exit regardless. Disable the
