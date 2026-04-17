@@ -441,6 +441,17 @@ EOF
   [[ "$stderr" == *"deny"* ]] || [[ "$output" == *"deny"* ]]
 }
 
+@test "validate_rules rejects relative path in allowed_dirs" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[],"allowed_dirs":["relative/path"]}'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"absolute path"* ]] || [[ "$stderr" == *"absolute path"* ]]
+}
+
+@test "validate_rules accepts absolute path in allowed_dirs" {
+  run validate_rules '{"version":2,"allow":[],"deny":[],"ask":[],"allowed_dirs":["/opt/shared"]}'
+  [ "$status" -eq 0 ]
+}
+
 # ---------------------------------------------------------------------------
 # combined: load_rules output always passes validate_rules
 # ---------------------------------------------------------------------------

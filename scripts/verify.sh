@@ -305,6 +305,45 @@ for ((fi = 0; fi < ${#PARSED_FILES[@]}; fi++)); do
     diag error "$file" ".version" "" "schema: unsupported version $ver (expected 1 or 2)"
   fi
 
+  # allowed_dirs[] validation (optional key, any schema version).
+  # Read from the raw file since normalization drops allowed_dirs.
+  # Skip if the file is empty (already normalized to synthetic {}).
+  raw_ad_type="null"
+  [ -s "$file" ] && raw_ad_type="$(jq -r '.allowed_dirs | type' "$file" 2>/dev/null)"
+  if [ "$raw_ad_type" != "null" ]; then
+    if [ "$raw_ad_type" != "array" ]; then
+      diag error "$file" ".allowed_dirs" "" "schema: allowed_dirs must be an array (got $raw_ad_type)"
+    else
+      n_ad="$(jq -r '.allowed_dirs | length' "$file" 2>/dev/null)"
+      for ((ai = 0; ai < n_ad; ai++)); do
+        ad_val_type="$(jq -r ".allowed_dirs[$ai] | type" "$file" 2>/dev/null)"
+        if [ "$ad_val_type" != "string" ]; then
+          diag error "$file" ".allowed_dirs[$ai]" "" "schema: allowed_dirs entry must be a string (got $ad_val_type)"
+          continue
+        fi
+        ad_val="$(jq -r ".allowed_dirs[$ai]" "$file" 2>/dev/null)"
+        if [ -z "$ad_val" ]; then
+          diag error "$file" ".allowed_dirs[$ai]" "" "schema: allowed_dirs entry must be non-empty"
+          continue
+        fi
+        case "$ad_val" in
+          /*)
+            # absolute path - ok, continue to further checks
+            ;;
+          *)
+            diag error "$file" ".allowed_dirs[$ai]" "" "schema: allowed_dirs entry must be an absolute path (start with /)"
+            continue
+            ;;
+        esac
+        case "$ad_val" in
+          *'/../'*|*'/..')
+            diag error "$file" ".allowed_dirs[$ai]" "" "schema: allowed_dirs entry contains path traversal (/../)"
+            ;;
+        esac
+      done
+    fi
+  fi
+
   # Allow[] rules.
   n_allow="$(jq -r '.allow | length' <<<"$normalized")"
   for ((i = 0; i < n_allow; i++)); do

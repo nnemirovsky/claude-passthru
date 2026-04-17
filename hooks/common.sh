@@ -8,6 +8,12 @@
 #   pcre_match <subject> <pat> - PCRE match via perl. 0=match, 1=no-match, 2=bad-regex.
 #   match_rule <tool_name> <tool_input_json> <rule_json> - 0=match, 1=no-match, 2=bad-regex.
 #   find_first_match <rules_array_json> <tool_name> <tool_input_json> - first matching rule on stdout.
+#   load_allowed_dirs            - collect allowed_dirs arrays from rule files, emit JSON on stdout.
+#   split_bash_command <cmd>     - split a compound shell command into segments on stdout.
+#   is_readonly_command <seg>    - 0 if segment is a recognized read-only command.
+#   readonly_paths_allowed <seg> <dirs_json> - 0 if all paths in segment fall inside allowed dirs.
+#   match_all_segments <segs...> - match every segment against rules, emit merged verdict on stdout.
+#   _pm_path_inside_any_allowed <path> <dirs_json> - 0 if path is inside any allowed directory.
 #
 # All output is plain ASCII. Errors go to stderr. Functions return non-zero on failure
 # without calling `exit` so callers can decide how to recover (hook handler fails open,
@@ -340,7 +346,7 @@ overlay_available() {
   [ -n "$mux" ]
 }
 
-# permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd>
+# permission_mode_auto_allows <mode> <tool_name> <tool_input_json> <cwd> [allowed_dirs_json]
 #
 # Returns 0 if Claude Code itself would auto-allow this tool call in the given
 # permission mode, 1 otherwise.
@@ -376,7 +382,10 @@ overlay_available() {
 #   Unknown mode:     1 (fail-safe: run the overlay).
 # _pm_path_inside_cwd: return 0 when path is literally inside cwd and free of
 # ../ traversal. We do NOT canonicalize paths, so a symlink inside cwd
-# pointing outside cwd still passes - documented as a known limitation.
+# pointing outside cwd still passes. This matches CC's own pathValidation.ts
+# which also uses literal prefix checks without resolving symlinks.
+# KNOWN LIMITATION: resolving symlinks would require spawning readlink -f or
+# realpath per path token, adding process overhead per tool call.
 #
 # Hoisted out of permission_mode_auto_allows so it is defined once per shell
 # rather than re-defined on every tool call.
@@ -384,11 +393,18 @@ _pm_path_inside_cwd() {
   local p="$1" c="$2"
   [ -z "$p" ] && return 1
   [ -z "$c" ] && return 1
+  # Strip trailing slashes from the directory so "/opt/shared/" becomes
+  # "/opt/shared" and the glob below works correctly.
+  c="${c%/}"
+  [ -z "$c" ] && return 1
   # Reject `..` traversal anywhere in the path (including the middle).
   case "$p" in
     *'/../'*|*'/..') return 1 ;;
   esac
-  # Literal prefix check: path must start with "$cwd/" (not just "$cwd").
+  # Exact match (path IS the directory) or literal prefix (descendant).
+  if [ "$p" = "$c" ]; then
+    return 0
+  fi
   case "$p" in
     "$c"/*) return 0 ;;
   esac
@@ -396,7 +412,7 @@ _pm_path_inside_cwd() {
 }
 
 permission_mode_auto_allows() {
-  local mode="$1" tool_name="$2" tool_input="$3" cwd="$4"
+  local mode="$1" tool_name="$2" tool_input="$3" cwd="$4" allowed_dirs_json="${5:-[]}"
 
   # A bypassPermissions session auto-allows every tool call - mirror that.
   if [ "$mode" = "bypassPermissions" ]; then
@@ -414,7 +430,7 @@ permission_mode_auto_allows() {
         Write|Edit|NotebookEdit|MultiEdit)
           local fp
           fp="$(jq -r '.file_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
-          if _pm_path_inside_cwd "$fp" "$cwd"; then
+          if _pm_path_inside_any_allowed "$fp" "$cwd" "$allowed_dirs_json"; then
             return 0
           fi
           return 1
@@ -422,7 +438,7 @@ permission_mode_auto_allows() {
         Read|NotebookRead)
           local fp
           fp="$(jq -r '.file_path // .notebook_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
-          if _pm_path_inside_cwd "$fp" "$cwd"; then
+          if _pm_path_inside_any_allowed "$fp" "$cwd" "$allowed_dirs_json"; then
             return 0
           fi
           return 1
@@ -433,7 +449,7 @@ permission_mode_auto_allows() {
           if [ -z "$gp" ]; then
             return 0
           fi
-          if _pm_path_inside_cwd "$gp" "$cwd"; then
+          if _pm_path_inside_any_allowed "$gp" "$cwd" "$allowed_dirs_json"; then
             return 0
           fi
           return 1
@@ -448,7 +464,7 @@ permission_mode_auto_allows() {
         Read|NotebookRead)
           local fp
           fp="$(jq -r '.file_path // .notebook_path // ""' <<<"$tool_input" 2>/dev/null || printf '')"
-          if _pm_path_inside_cwd "$fp" "$cwd"; then
+          if _pm_path_inside_any_allowed "$fp" "$cwd" "$allowed_dirs_json"; then
             return 0
           fi
           return 1
@@ -460,7 +476,7 @@ permission_mode_auto_allows() {
           if [ -z "$gp" ]; then
             return 0
           fi
-          if _pm_path_inside_cwd "$gp" "$cwd"; then
+          if _pm_path_inside_any_allowed "$gp" "$cwd" "$allowed_dirs_json"; then
             return 0
           fi
           return 1
@@ -1030,6 +1046,37 @@ validate_rules() {
     fi
   fi
 
+  # Validate allowed_dirs (optional). Must be an array of non-empty strings.
+  # Reject path traversal (/../) in entries.
+  local ad_type
+  ad_type="$(jq -r '.allowed_dirs | type' <<<"$merged" 2>/dev/null)"
+  if [ "$ad_type" != "null" ]; then
+    if [ "$ad_type" != "array" ]; then
+      printf '[ERR] .allowed_dirs must be an array, got %s\n' "$ad_type" >&2
+      return 2
+    fi
+    local ad_report
+    ad_report="$(jq -r '
+      (.allowed_dirs // []) | to_entries[] |
+      (if (.value | type) != "string" then
+         "allowed_dirs[\(.key)]: value must be a string"
+       elif (.value | length) == 0 then
+         "allowed_dirs[\(.key)]: value must be non-empty"
+       elif (.value | startswith("/") | not) then
+         "allowed_dirs[\(.key)]: must be an absolute path (start with /)"
+       elif (.value | test("/(\\.\\.)(/|$)")) then
+         "allowed_dirs[\(.key)]: path traversal (/../) not allowed"
+       else empty end)
+    ' <<<"$merged" 2>/dev/null)"
+    if [ -n "$ad_report" ]; then
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        printf '[ERR] schema: %s\n' "$line" >&2
+      done <<<"$ad_report"
+      return 2
+    fi
+  fi
+
   # Per-rule schema checks for allow[], deny[], and (on v2) ask[].
   # We pass the version as a jq arg so the same filter handles both schemas:
   # v2 walks ask[] too, v1 never does.
@@ -1082,6 +1129,779 @@ validate_rules() {
   fi
 
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# load_allowed_dirs
+# ---------------------------------------------------------------------------
+#
+# Reads the optional `allowed_dirs` key from all four rule files (user-authored,
+# user-imported, project-authored, project-imported), concatenates them, and
+# deduplicates. Returns a JSON array on stdout.
+#
+# Separate from `load_rules` to preserve the `{version, allow, deny, ask}`
+# contract that validate_rules, build_ordered_allow_ask, and callers depend on.
+# The IO cost is negligible (4 small JSON files, already in filesystem cache
+# from load_rules).
+#
+# Missing files, empty files, and files without `allowed_dirs` contribute
+# nothing. Malformed JSON is silently skipped (same fail-open as load_rules).
+load_allowed_dirs() {
+  local files=(
+    "$(passthru_user_authored_path)"
+    "$(passthru_user_imported_path)"
+    "$(passthru_project_authored_path)"
+    "$(passthru_project_imported_path)"
+  )
+
+  local all_dirs="[]"
+  local f dir_arr
+  for f in "${files[@]}"; do
+    [ -f "$f" ] && [ -s "$f" ] || continue
+    dir_arr="$(jq -c '.allowed_dirs // []' "$f" 2>/dev/null || printf '[]')"
+    [ "$dir_arr" = "[]" ] && continue
+    all_dirs="$(jq -cn --argjson a "$all_dirs" --argjson b "$dir_arr" '$a + $b')"
+  done
+
+  # Deduplicate (sorted by jq unique).
+  jq -c '[.[] | select(type == "string" and length > 0)] | unique' <<<"$all_dirs" 2>/dev/null || printf '[]\n'
+}
+
+# ---------------------------------------------------------------------------
+# Read-only Bash command auto-allow
+# ---------------------------------------------------------------------------
+#
+# Mirrors Claude Code's readOnlyValidation.ts. Simple commands use the generic
+# safety regex: ^<cmd>(?:\s|$)[^<>()$`|{}&;\n\r]*$
+# Commands needing custom patterns have hand-written PCRE entries.
+#
+# is_readonly_command <segment>
+#   Returns 0 if the segment matches a readonly command PCRE, 1 otherwise.
+#
+# readonly_paths_allowed <segment> <cwd> [allowed_dirs_json]
+#   After a segment passes is_readonly_command, extract non-flag tokens and
+#   verify all absolute paths are inside cwd or allowed dirs. Returns 0 if
+#   all paths are valid, 1 if any absolute path is outside.
+
+# Generic safety regex template. The command name is substituted in.
+# Pattern: ^<cmd>(?:\s|$)[^<>()$`|{}&;\n\r]*$
+# This rejects any shell metacharacters in the arguments.
+_PASSTHRU_READONLY_SAFE_SUFFIX='(?:\s|$)[^<>()$`|{}&;\n\r]*$'
+
+# Simple commands that use the generic safety regex.
+PASSTHRU_READONLY_COMMANDS=(
+  cal uptime cat head tail wc stat strings hexdump od nl id uname free df du
+  locale groups nproc basename dirname realpath cut paste tr column tac rev
+  fold expand unexpand fmt comm cmp numfmt readlink diff true false sleep
+  which type expr test getconf seq tsort pr
+)
+
+# Two-word commands that use the generic safety regex with full prefix.
+PASSTHRU_READONLY_TWO_WORD_COMMANDS=(
+  "docker ps"
+  "docker images"
+)
+
+# Custom regex commands. Each entry is a full PCRE to match against the segment.
+PASSTHRU_READONLY_CUSTOM_REGEXES=(
+  # echo: safe subset. No $, backticks, or $() in arguments.
+  "^echo(\s|$)[^<>()\$\x60|{}&;\n\r]*$"
+  # pwd: bare or with safe-char args only.
+  "^pwd(\s[^<>()\$\x60|{}&;\n\r]*)?$"
+  # whoami: bare only.
+  "^whoami$"
+  # ls: no dangerous chars (same safe suffix).
+  "^ls(\s|$)[^<>()\$\x60|{}&;\n\r]*$"
+  # find: no -exec, -delete, -execdir, -fprint, -fprintf, -fls (all write to files).
+  "^find(\s|$)(?!.*(-exec\b|-execdir\b|-delete\b|-fprint\b|-fprintf\b|-fls\b))[^<>()\$\x60|{}&;\n\r]*$"
+  # cd: no expansion chars.
+  "^cd(\s|$)[^<>()\$\x60|{}&;\n\r]*$"
+  # jq: no -f/--from-file/--rawfile/--slurpfile (prevent file reads).
+  "^jq(\s|$)(?!.*(\s-f\s|\s--from-file\b|\s--rawfile\b|\s--slurpfile\b))[^<>()\$\x60|{}&;\n\r]*$"
+  # uniq: flags only or with stdin.
+  "^uniq(\s|$)[^<>()\$\x60|{}&;\n\r]*$"
+  # history: bare or with numeric arg.
+  "^history(\s+[0-9]+)?$"
+  # alias: bare or with name.
+  "^alias(\s|$)[^<>()\$\x60|{}&;\n\r]*$"
+  # arch: bare only.
+  "^arch$"
+  # node version checks.
+  "^node\s+(-v|--version)$"
+  # python version checks.
+  "^python\s+--version$"
+  "^python3\s+--version$"
+)
+
+# is_readonly_command <segment>
+# Returns 0 if the segment matches any readonly command pattern, 1 otherwise.
+is_readonly_command() {
+  local segment="$1"
+  [ -z "$segment" ] && return 1
+
+  # Check simple commands with generic safety regex.
+  local cmd
+  for cmd in "${PASSTHRU_READONLY_COMMANDS[@]}"; do
+    if pcre_match "$segment" "^${cmd}${_PASSTHRU_READONLY_SAFE_SUFFIX}"; then
+      return 0
+    fi
+  done
+
+  # Check two-word commands with generic safety regex.
+  local two_word
+  for two_word in "${PASSTHRU_READONLY_TWO_WORD_COMMANDS[@]}"; do
+    if pcre_match "$segment" "^${two_word}${_PASSTHRU_READONLY_SAFE_SUFFIX}"; then
+      return 0
+    fi
+  done
+
+  # Check custom regex commands.
+  local pattern
+  for pattern in "${PASSTHRU_READONLY_CUSTOM_REGEXES[@]}"; do
+    if pcre_match "$segment" "$pattern"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# readonly_paths_allowed <segment> <cwd> [allowed_dirs_json]
+# After a segment passes is_readonly_command, extract non-flag tokens and
+# verify all absolute paths are inside cwd or allowed dirs.
+# Returns 0 if all paths are valid, 1 if any absolute path is outside.
+readonly_paths_allowed() {
+  local segment="$1" cwd="$2" allowed_dirs_json="${3:-[]}"
+  [ -z "$segment" ] && return 0
+  [ -z "$cwd" ] && return 1
+
+  # Tokenize by whitespace. Simple split is sufficient here because the
+  # segment already passed the readonly regex which rejects shell metacharacters.
+  # Skip the command name (first token or first two for two-word commands)
+  # and flag tokens (starting with -).
+  local tokens=()
+  read -ra tokens <<< "$segment"
+  local token_count="${#tokens[@]}"
+  [ "$token_count" -le 1 ] && return 0
+
+  # Determine how many leading tokens to skip (command name).
+  local skip=1
+  # Check if this is a two-word command.
+  if [ "$token_count" -ge 2 ]; then
+    local first_two="${tokens[0]} ${tokens[1]}"
+    local tw
+    for tw in "${PASSTHRU_READONLY_TWO_WORD_COMMANDS[@]}"; do
+      if [ "$first_two" = "$tw" ]; then
+        skip=2
+        break
+      fi
+    done
+  fi
+
+  local i token stripped
+  for ((i = skip; i < token_count; i++)); do
+    token="${tokens[$i]}"
+    # Skip flag tokens.
+    case "$token" in
+      -*) continue ;;
+    esac
+    # Strip surrounding quotes (single or double) from the token so that
+    # paths like "/etc/passwd" or '/etc/passwd' are recognized as absolute.
+    # Also strip a leading-only quote. read -ra splits on whitespace, so
+    # a quoted multi-word path like "../secret dir/file" tokenizes into
+    # "\"../secret" and "dir/file\"". Without stripping the orphaned leading
+    # quote, traversal patterns like ../ are hidden behind the quote char.
+    stripped="$token"
+    case "$stripped" in
+      \"*\") stripped="${stripped#\"}"; stripped="${stripped%\"}" ;;
+      \'*\') stripped="${stripped#\'}"; stripped="${stripped%\'}" ;;
+      \"*)   stripped="${stripped#\"}" ;;
+      \'*)   stripped="${stripped#\'}" ;;
+    esac
+    # Reject relative paths containing .. traversal. These can escape cwd
+    # without starting with / (e.g. cat ../../../etc/passwd, ls ..,
+    # find .. -name secret).
+    case "$stripped" in
+      '..'|../*|*/../*|*/..) return 1 ;;
+    esac
+    # Reject tilde-prefixed paths. Bash expands ~ to $HOME before execution,
+    # so `cat ~/.ssh/id_rsa` reads from /Users/foo/.ssh/id_rsa even though
+    # the token does not start with /. Also covers ~user (home of another
+    # user), ~+ ($PWD), and ~- ($OLDPWD). Reject any token starting with ~.
+    case "$stripped" in
+      "~"*) return 1 ;;
+    esac
+    # Validate absolute paths (starting with /).
+    case "$stripped" in
+      /*)
+        if ! _pm_path_inside_any_allowed "$stripped" "$cwd" "$allowed_dirs_json"; then
+          return 1
+        fi
+        ;;
+    esac
+    # Relative paths without traversal are assumed to resolve inside cwd.
+  done
+
+  return 0
+}
+
+# _pm_path_inside_any_allowed <path> <cwd> <allowed_dirs_json>
+# Returns 0 if the path is inside cwd or any allowed dir, 1 otherwise.
+_pm_path_inside_any_allowed() {
+  local p="$1" cwd="$2" allowed_dirs_json="${3:-[]}"
+
+  # Check cwd first.
+  if _pm_path_inside_cwd "$p" "$cwd"; then
+    return 0
+  fi
+
+  # Check allowed dirs.
+  if [ -n "$allowed_dirs_json" ] && [ "$allowed_dirs_json" != "[]" ] && [ "$allowed_dirs_json" != "null" ]; then
+    local dir
+    while IFS= read -r dir; do
+      [ -z "$dir" ] && continue
+      if _pm_path_inside_cwd "$p" "$dir"; then
+        return 0
+      fi
+    done < <(jq -r '.[]? // empty' <<< "$allowed_dirs_json" 2>/dev/null)
+  fi
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# has_redirect
+# ---------------------------------------------------------------------------
+#
+# Usage: has_redirect <command>
+# Returns 0 if the command contains an unquoted redirection (> >> or <),
+# 1 otherwise. Uses perl with the same quoting-aware parser as
+# split_bash_command so quoted `>` or `<` inside strings are not false
+# positives.
+#
+# Purpose: split_bash_command strips redirections before emitting segments.
+# A command like `cat file > /tmp/out` becomes segment `cat file` which
+# passes is_readonly_command. But CC executes the ORIGINAL command with
+# the redirection, so a write actually happens. Similarly, input redirects
+# (`wc < /etc/passwd`) collapse to `wc` after stripping, hiding the path
+# from readonly_paths_allowed. This function detects any unquoted redirect
+# in the raw command so the readonly auto-allow block can reject such
+# commands.
+has_redirect() {
+  local cmd="$1"
+  [ -z "$cmd" ] && return 1
+
+  perl -e '
+use strict;
+use warnings;
+my $input = $ARGV[0];
+my $len = length($input);
+my $pos = 0;
+
+while ($pos < $len) {
+  my $ch = substr($input, $pos, 1);
+
+  # Backslash escape.
+  if ($ch eq "\\") { $pos += 2; next; }
+
+  # Single-quoted string: skip entirely.
+  if ($ch eq "'\''") {
+    $pos++;
+    while ($pos < $len && substr($input, $pos, 1) ne "'\''") { $pos++; }
+    $pos++ if $pos < $len;
+    next;
+  }
+
+  # Double-quoted string: skip, respecting backslash escapes inside.
+  if ($ch eq "\"") {
+    $pos++;
+    while ($pos < $len && substr($input, $pos, 1) ne "\"") {
+      if (substr($input, $pos, 1) eq "\\") { $pos += 2; next; }
+      $pos++;
+    }
+    $pos++ if $pos < $len;
+    next;
+  }
+
+  # $() subshell: skip nested content.
+  if ($ch eq "\$" && $pos + 1 < $len && substr($input, $pos + 1, 1) eq "(") {
+    $pos++;
+    my $depth = 0;
+    while ($pos < $len) {
+      my $sch = substr($input, $pos, 1);
+      if ($sch eq "\\") { $pos += 2; next; }
+      if ($sch eq "'\''") {
+        $pos++;
+        while ($pos < $len && substr($input, $pos, 1) ne "'\''") { $pos++; }
+        $pos++ if $pos < $len;
+        next;
+      }
+      if ($sch eq "\"") {
+        $pos++;
+        while ($pos < $len && substr($input, $pos, 1) ne "\"") {
+          if (substr($input, $pos, 1) eq "\\") { $pos += 2; next; }
+          $pos++;
+        }
+        $pos++ if $pos < $len;
+        next;
+      }
+      if ($sch eq "(") { $depth++; $pos++; next; }
+      if ($sch eq ")") {
+        if ($depth <= 1) { $pos++; last; }
+        $depth--; $pos++; next;
+      }
+      $pos++;
+    }
+    next;
+  }
+
+  # Backtick subshell: skip.
+  if ($ch eq "`") {
+    $pos++;
+    while ($pos < $len && substr($input, $pos, 1) ne "`") {
+      if (substr($input, $pos, 1) eq "\\") { $pos += 2; next; }
+      $pos++;
+    }
+    $pos++ if $pos < $len;
+    next;
+  }
+
+  # Unquoted > or >>. Skip >&N patterns (fd duplication, not file output)
+  # when the target is a bare digit (e.g. 2>&1). But >& followed by a
+  # non-digit IS an output redirect (e.g. >& file).
+  if ($ch eq ">") {
+    # Check for >& pattern.
+    my $next_pos = $pos + 1;
+    # Skip >> to get to the character after.
+    $next_pos++ if $next_pos < $len && substr($input, $next_pos, 1) eq ">";
+    if ($next_pos < $len && substr($input, $next_pos, 1) eq "&") {
+      # >&N where N is a digit: fd duplication, not a file write.
+      if ($next_pos + 1 < $len && substr($input, $next_pos + 1, 1) =~ /^\d$/) {
+        $pos = $next_pos + 2;
+        next;
+      }
+    }
+    # This is an output redirect to a file.
+    exit 0;
+  }
+
+  # Unquoted <. Skip <<EOF heredoc and <<<herestring (these do not read
+  # from an external file path). A bare < followed by something other than
+  # < is an input redirect that split_bash_command strips, hiding the path
+  # from readonly_paths_allowed.
+  #
+  # Known limitation: after skipping the << marker, the loop continues
+  # scanning the heredoc body as ordinary text. An unquoted < or > inside
+  # the heredoc payload will be misclassified as a redirect, causing the
+  # command to fall through to ask instead of auto-allow. This is
+  # safety-conservative (more restrictive, not less) and heredoc commands
+  # in Claude Code Bash tool calls are uncommon, so we accept the false
+  # positive rather than adding complex heredoc-body parsing.
+  if ($ch eq "<") {
+    if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "<") {
+      # << or <<<: heredoc / herestring, not an input file redirect.
+      # Skip past the second (and optional third) < so the main loop
+      # does not re-examine them.
+      $pos += 2;
+      $pos++ if $pos < $len && substr($input, $pos, 1) eq "<";
+      next;
+    }
+    # This is an input redirect from a file.
+    exit 0;
+  }
+
+  $pos++;
+}
+
+# No unquoted redirect found.
+exit 1;
+' "$cmd"
+}
+
+# ---------------------------------------------------------------------------
+# split_bash_command
+# ---------------------------------------------------------------------------
+#
+# Usage: split_bash_command <command>
+# Output: NUL-separated segments on stdout. Each segment is a subcommand with
+#         redirections stripped. Empty segments (from consecutive operators) are
+#         filtered out.
+#
+# The splitter uses perl (already a dependency for pcre_match) to tokenize the
+# command respecting:
+#   - single quotes ('...')
+#   - double quotes ("...")
+#   - $() subshells (nested)
+#   - backtick subshells (`...`)
+#   - backslash escaping
+#
+# Splits on unquoted: | && || ; &
+# Strips redirections: > >> < 2>&1 2>/dev/null N>&M N>file etc.
+#
+# Fail-safe: on parse error (unterminated quotes, etc.) returns the original
+# command as a single segment. This preserves current behavior (full command
+# matched as-is).
+split_bash_command() {
+  local cmd="$1"
+  [ -z "$cmd" ] && return 0
+
+  perl -e '
+use strict;
+use warnings;
+
+my $input = $ARGV[0];
+my $len = length($input);
+my $pos = 0;
+my @segments = ();
+my $current = "";
+my $error = 0;
+
+# Tokenize character by character, tracking quoting context.
+while ($pos < $len) {
+  my $ch = substr($input, $pos, 1);
+
+  # Backslash escape (outside single quotes).
+  if ($ch eq "\\") {
+    if ($pos + 1 < $len) {
+      $current .= substr($input, $pos, 2);
+      $pos += 2;
+      next;
+    } else {
+      # Trailing backslash: keep it.
+      $current .= $ch;
+      $pos++;
+      next;
+    }
+  }
+
+  # Single-quoted string: consume until closing single quote.
+  if ($ch eq "'\''") {
+    my $start = $pos;
+    $pos++;
+    while ($pos < $len && substr($input, $pos, 1) ne "'\''") {
+      $pos++;
+    }
+    if ($pos >= $len) {
+      # Unterminated single quote: fail-safe.
+      $error = 1;
+      last;
+    }
+    $current .= substr($input, $start, $pos - $start + 1);
+    $pos++;
+    next;
+  }
+
+  # Double-quoted string: consume until closing double quote, respecting
+  # backslash escapes and $() / backtick nesting inside.
+  if ($ch eq "\"") {
+    my $start = $pos;
+    $pos++;
+    while ($pos < $len && substr($input, $pos, 1) ne "\"") {
+      my $dch = substr($input, $pos, 1);
+      if ($dch eq "\\") {
+        $pos += 2;  # skip escaped char
+        next;
+      }
+      if ($dch eq "\$" && $pos + 1 < $len && substr($input, $pos + 1, 1) eq "(") {
+        # $() inside double quotes: find matching paren.
+        $pos++;  # skip $
+        my $depth = 0;
+        while ($pos < $len) {
+          my $sch = substr($input, $pos, 1);
+          if ($sch eq "\\") { $pos += 2; next; }
+          if ($sch eq "'\''") {
+            $pos++;
+            while ($pos < $len && substr($input, $pos, 1) ne "'\''") { $pos++; }
+            $pos++ if $pos < $len;
+            next;
+          }
+          if ($sch eq "(") { $depth++; $pos++; next; }
+          if ($sch eq ")") {
+            if ($depth <= 1) { $pos++; last; }
+            $depth--;
+            $pos++;
+            next;
+          }
+          $pos++;
+        }
+        next;
+      }
+      if ($dch eq "`") {
+        # backtick inside double quotes.
+        $pos++;
+        while ($pos < $len && substr($input, $pos, 1) ne "`") {
+          if (substr($input, $pos, 1) eq "\\") { $pos += 2; next; }
+          $pos++;
+        }
+        $pos++ if $pos < $len;
+        next;
+      }
+      $pos++;
+    }
+    if ($pos >= $len) {
+      $error = 1;
+      last;
+    }
+    $current .= substr($input, $start, $pos - $start + 1);
+    $pos++;
+    next;
+  }
+
+  # $() subshell (outside quotes): track nested parens.
+  if ($ch eq "\$" && $pos + 1 < $len && substr($input, $pos + 1, 1) eq "(") {
+    my $start = $pos;
+    $pos++;  # skip $
+    my $depth = 0;
+    while ($pos < $len) {
+      my $sch = substr($input, $pos, 1);
+      if ($sch eq "\\") { $pos += 2; next; }
+      if ($sch eq "'\''") {
+        $pos++;
+        while ($pos < $len && substr($input, $pos, 1) ne "'\''") { $pos++; }
+        $pos++ if $pos < $len;
+        next;
+      }
+      if ($sch eq "\"") {
+        $pos++;
+        while ($pos < $len && substr($input, $pos, 1) ne "\"") {
+          if (substr($input, $pos, 1) eq "\\") { $pos += 2; next; }
+          $pos++;
+        }
+        $pos++ if $pos < $len;
+        next;
+      }
+      if ($sch eq "(") { $depth++; $pos++; next; }
+      if ($sch eq ")") {
+        if ($depth <= 1) { $pos++; last; }
+        $depth--;
+        $pos++;
+        next;
+      }
+      $pos++;
+    }
+    $current .= substr($input, $start, $pos - $start);
+    next;
+  }
+
+  # Backtick subshell (outside quotes).
+  if ($ch eq "`") {
+    my $start = $pos;
+    $pos++;
+    while ($pos < $len && substr($input, $pos, 1) ne "`") {
+      if (substr($input, $pos, 1) eq "\\") { $pos += 2; next; }
+      $pos++;
+    }
+    if ($pos >= $len) {
+      $error = 1;
+      last;
+    }
+    $current .= substr($input, $start, $pos - $start + 1);
+    $pos++;
+    next;
+  }
+
+  # Pipe operator: | or ||
+  if ($ch eq "|") {
+    if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "|") {
+      # || operator
+      push @segments, $current;
+      $current = "";
+      $pos += 2;
+      next;
+    }
+    # single pipe |
+    push @segments, $current;
+    $current = "";
+    $pos++;
+    next;
+  }
+
+  # && operator or bare & (background). But NOT part of N>&M redirection.
+  if ($ch eq "&") {
+    if ($pos + 1 < $len && substr($input, $pos + 1, 1) eq "&") {
+      push @segments, $current;
+      $current = "";
+      $pos += 2;
+      next;
+    }
+    # Check if this & is part of a >&N redirection pattern (e.g. 2>&1).
+    # Look back: if the preceding non-space content ends with > or N>,
+    # this is a redirection target, not a command separator.
+    if ($current =~ /\d*>\s*$/) {
+      $current .= $ch;
+      $pos++;
+      next;
+    }
+    # bare & (background)
+    push @segments, $current;
+    $current = "";
+    $pos++;
+    next;
+  }
+
+  # ; operator
+  if ($ch eq ";") {
+    push @segments, $current;
+    $current = "";
+    $pos++;
+    next;
+  }
+
+  # Default: accumulate.
+  $current .= $ch;
+  $pos++;
+}
+
+if ($error) {
+  # Fail-safe: return original command as single segment.
+  print $ARGV[0];
+  print "\0";
+  exit 0;
+}
+
+# Push final segment.
+push @segments, $current;
+
+# Strip redirections from each segment (quote-aware), trim whitespace,
+# filter empty.  The old approach used regex substitution which is not
+# quote-aware and corrupts strings like: echo "hello > world".
+#
+# This replacement scans character-by-character, tracks quoting context
+# (single-quote, double-quote, $()-subshell, backtick), and only strips
+# redirect operators + their targets when outside any quoting context.
+for my $seg (@segments) {
+  my $slen = length($seg);
+  my $si = 0;
+  my $out = "";
+
+  while ($si < $slen) {
+    my $sc = substr($seg, $si, 1);
+
+    # --- quoting contexts: pass through verbatim ---
+    if ($sc eq "'\''") {
+      my $qs = $si;
+      $si++;
+      while ($si < $slen && substr($seg, $si, 1) ne "'\''") { $si++; }
+      $si++ if $si < $slen;  # closing quote
+      $out .= substr($seg, $qs, $si - $qs);
+      next;
+    }
+    if ($sc eq "\"") {
+      my $qs = $si;
+      $si++;
+      while ($si < $slen && substr($seg, $si, 1) ne "\"") {
+        if (substr($seg, $si, 1) eq "\\") { $si += 2; next; }
+        $si++;
+      }
+      $si++ if $si < $slen;  # closing quote
+      $out .= substr($seg, $qs, $si - $qs);
+      next;
+    }
+    if ($sc eq "\$" && $si + 1 < $slen && substr($seg, $si + 1, 1) eq "(") {
+      my $qs = $si;
+      $si++;  # skip $
+      my $sd = 0;
+      while ($si < $slen) {
+        my $ssc = substr($seg, $si, 1);
+        if ($ssc eq "(") { $sd++; $si++; next; }
+        if ($ssc eq ")") { $sd--; $si++; last if $sd <= 0; next; }
+        if ($ssc eq "\\") { $si += 2; next; }
+        $si++;
+      }
+      $out .= substr($seg, $qs, $si - $qs);
+      next;
+    }
+    if ($sc eq "`") {
+      my $qs = $si;
+      $si++;
+      while ($si < $slen && substr($seg, $si, 1) ne "`") {
+        if (substr($seg, $si, 1) eq "\\") { $si += 2; next; }
+        $si++;
+      }
+      $si++ if $si < $slen;
+      $out .= substr($seg, $qs, $si - $qs);
+      next;
+    }
+
+    # --- outside quotes: detect redirect operators ---
+    # Collect optional leading digits (fd number).
+    my $rstart = $si;
+    my $dpos = $si;
+    while ($dpos < $slen && substr($seg, $dpos, 1) =~ /\d/) { $dpos++; }
+
+    if ($dpos < $slen && (substr($seg, $dpos, 1) eq ">" || substr($seg, $dpos, 1) eq "<")) {
+      my $op = substr($seg, $dpos, 1);
+      my $ri = $dpos + 1;
+
+      if ($op eq ">") {
+        # >>file or >&N or >file
+        if ($ri < $slen && substr($seg, $ri, 1) eq ">") {
+          $ri++;  # >>
+        } elsif ($ri < $slen && substr($seg, $ri, 1) eq "&") {
+          # >&N  (fd dup)
+          $ri++;
+          while ($ri < $slen && substr($seg, $ri, 1) =~ /\d/) { $ri++; }
+          $si = $ri;
+          next;
+        }
+      }
+      # <file (but skip << heredoc and <<< herestring - leave them, they
+      # are not simple redirections we can strip).
+      if ($op eq "<") {
+        if ($ri < $slen && substr($seg, $ri, 1) eq "<") {
+          # << or <<<: not a simple redirect. Emit the entire remaining
+          # << / <<< token plus everything after it verbatim (heredocs
+          # span to the end of the segment as seen by the splitter).
+          $out .= substr($seg, $rstart);
+          $si = $slen;
+          next;
+        }
+      }
+
+      # Skip optional whitespace after operator.
+      while ($ri < $slen && substr($seg, $ri, 1) =~ /\s/) { $ri++; }
+
+      # Consume target: a non-whitespace sequence (the file path or &N).
+      my $target_start = $ri;
+      # Target may be quoted.
+      if ($ri < $slen && substr($seg, $ri, 1) eq "'\''") {
+        $ri++;
+        while ($ri < $slen && substr($seg, $ri, 1) ne "'\''") { $ri++; }
+        $ri++ if $ri < $slen;
+      } elsif ($ri < $slen && substr($seg, $ri, 1) eq "\"") {
+        $ri++;
+        while ($ri < $slen && substr($seg, $ri, 1) ne "\"") {
+          if (substr($seg, $ri, 1) eq "\\") { $ri += 2; next; }
+          $ri++;
+        }
+        $ri++ if $ri < $slen;
+      } else {
+        while ($ri < $slen && substr($seg, $ri, 1) !~ /\s/) { $ri++; }
+      }
+
+      # Only strip if we actually consumed a target (not just a bare > at EOL).
+      if ($ri > $target_start) {
+        $si = $ri;
+        next;
+      }
+    }
+
+    # Not a redirect, accumulate the character.
+    $out .= $sc;
+    $si++;
+  }
+
+  # Trim leading/trailing whitespace.
+  $out =~ s/^\s+//;
+  $out =~ s/\s+$//;
+
+  # Skip empty segments.
+  next if $out eq "";
+
+  print $out;
+  print "\0";
+}
+' "$cmd"
 }
 
 # ---------------------------------------------------------------------------
@@ -1250,6 +2070,119 @@ find_first_match() {
     fi
     # rc == 1: no match, keep looking.
   done
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# match_all_segments
+# ---------------------------------------------------------------------------
+#
+# Usage: match_all_segments <ordered_entries_json> <tool_name> <segments...>
+#
+# Implements per-segment first-match algorithm for compound Bash commands.
+# Each segment is walked independently against the ordered allow/ask entries
+# (same document-order list that build_ordered_allow_ask produces). For each
+# segment, the first matching entry's list type ("allow" or "ask") is recorded.
+#
+# Decision logic:
+#   - If ANY segment's first match is "ask", the whole command is "ask".
+#     Outputs the ask-matched entry on stdout.
+#   - If ALL segments' first matches are "allow", the whole command is "allow".
+#     Outputs the first segment's allow-matched entry on stdout.
+#   - If ANY segment has NO match at all, fall through (no output on stdout).
+#
+# Output (stdout): one line of TAB-separated fields when a decision is reached:
+#   <decision>\t<list_type>\t<merged_idx>\t<rule_json>
+#   where decision is "allow" or "ask".
+#   Empty stdout means at least one segment had no match (fall through).
+#
+# Return:
+#   0 on clean traversal (check stdout for emptiness)
+#   2 on regex compile failure in any rule (fail-open)
+#
+# Segments are passed as positional arguments after the first two (ordered JSON
+# and tool_name). This avoids bash 4.3+ namerefs (local -n) for compatibility
+# with bash 3.2 on stock macOS.
+# The ordered_entries_json is the same JSON array of {list, merged_idx, rule}
+# objects that build_ordered_allow_ask emits.
+match_all_segments() {
+  local ordered="$1"
+  local tool_name="$2"
+  shift 2
+
+  local _mas_segments=("$@")
+  local seg_count="${#_mas_segments[@]}"
+  if [ "$seg_count" -eq 0 ]; then
+    return 0
+  fi
+
+  local ordered_count
+  ordered_count="$(jq -r 'if type == "array" then length else 0 end' <<<"$ordered" 2>/dev/null)"
+  [ -z "$ordered_count" ] && ordered_count=0
+
+  if [ "$ordered_count" -eq 0 ]; then
+    # No rules at all: no match for any segment.
+    return 0
+  fi
+
+  # For each segment, find the first matching entry in the ordered list.
+  # Track the overall result: "allow" if all segments allow, "ask" if any ask,
+  # "" if any segment has no match.
+  local overall="allow"
+  local first_allow_entry=""  # entry from first segment's allow match
+  local ask_entry=""          # entry from any segment's ask match
+  local seg_idx seg seg_input entry list_type rule mrc
+
+  for ((seg_idx = 0; seg_idx < seg_count; seg_idx++)); do
+    seg="${_mas_segments[$seg_idx]}"
+    # Build a synthetic tool_input with the segment as the command.
+    seg_input="$(jq -cn --arg c "$seg" '{command: $c}')"
+
+    local found=0
+    local i
+    for ((i = 0; i < ordered_count; i++)); do
+      entry="$(jq -c --argjson i "$i" '.[$i]' <<<"$ordered" 2>/dev/null)"
+      list_type="$(jq -r '.list // ""' <<<"$entry" 2>/dev/null)"
+      rule="$(jq -c '.rule // {}' <<<"$entry" 2>/dev/null)"
+
+      mrc=0
+      match_rule "$tool_name" "$seg_input" "$rule" || mrc=$?
+      if [ "$mrc" -eq 2 ]; then
+        return 2
+      fi
+      if [ "$mrc" -eq 0 ]; then
+        found=1
+        if [ "$list_type" = "ask" ]; then
+          overall="ask"
+          ask_entry="$entry"
+        elif [ "$seg_idx" -eq 0 ] && [ -z "$first_allow_entry" ]; then
+          first_allow_entry="$entry"
+        fi
+        break
+      fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+      # This segment has no match at all. Fall through.
+      return 0
+    fi
+  done
+
+  # Emit the decision.
+  if [ "$overall" = "ask" ]; then
+    local a_list a_idx a_rule
+    a_list="$(jq -r '.list // ""' <<<"$ask_entry" 2>/dev/null)"
+    a_idx="$(jq -r '.merged_idx // 0' <<<"$ask_entry" 2>/dev/null)"
+    a_rule="$(jq -c '.rule // {}' <<<"$ask_entry" 2>/dev/null)"
+    printf '%s\t%s\t%s\t%s\n' "ask" "$a_list" "$a_idx" "$a_rule"
+  elif [ "$overall" = "allow" ] && [ -n "$first_allow_entry" ]; then
+    local f_list f_idx f_rule
+    f_list="$(jq -r '.list // ""' <<<"$first_allow_entry" 2>/dev/null)"
+    f_idx="$(jq -r '.merged_idx // 0' <<<"$first_allow_entry" 2>/dev/null)"
+    f_rule="$(jq -c '.rule // {}' <<<"$first_allow_entry" 2>/dev/null)"
+    printf '%s\t%s\t%s\t%s\n' "allow" "$f_list" "$f_idx" "$f_rule"
+  fi
 
   return 0
 }

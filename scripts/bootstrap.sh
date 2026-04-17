@@ -459,14 +459,33 @@ dedup_rules() {
 }
 
 # ---------------------------------------------------------------------------
+# Extract additionalAllowedWorkingDirs from a settings file.
+# Returns a JSON array of directory strings, or "[]" if absent/empty.
+# ---------------------------------------------------------------------------
+extract_allowed_dirs() {
+  local settings="$1"
+  [ -f "$settings" ] || { printf '[]\n'; return 0; }
+  jq -c '(.env.additionalAllowedWorkingDirs // []) | map(select(type == "string" and length > 0))' \
+    "$settings" 2>/dev/null || printf '[]\n'
+}
+
+# ---------------------------------------------------------------------------
 # Produce the imported JSON document for a scope.
 # Arg $1: JSON array of rule objects.
-# Stdout: full `{version:1, allow:[...], deny:[]}` document.
+# Arg $2 (optional): JSON array of allowed_dirs.
+# Stdout: full `{version:1, allow:[...], deny:[]}` document, optionally with
+#         `allowed_dirs` if the array is non-empty.
 # ---------------------------------------------------------------------------
 wrap_document() {
   local rules="$1"
-  jq -cn --argjson allow "$rules" \
-    '{version:1, allow:$allow, deny:[]}'
+  local allowed_dirs="${2:-[]}"
+  if [ "$allowed_dirs" = "[]" ] || [ -z "$allowed_dirs" ]; then
+    jq -cn --argjson allow "$rules" \
+      '{version:1, allow:$allow, deny:[]}'
+  else
+    jq -cn --argjson allow "$rules" --argjson ad "$allowed_dirs" \
+      '{version:1, allow:$allow, deny:[], allowed_dirs:$ad}'
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -475,10 +494,13 @@ wrap_document() {
 
 USER_RULES="[]"
 PROJECT_RULES="[]"
+USER_ALLOWED_DIRS="[]"
+PROJECT_ALLOWED_DIRS="[]"
 
 if [ "$SCOPE" = "all" ] || [ "$SCOPE" = "user" ]; then
   user_converted="$(convert_settings_file "$USER_SETTINGS")"
   USER_RULES="$user_converted"
+  USER_ALLOWED_DIRS="$(extract_allowed_dirs "$USER_SETTINGS")"
 fi
 
 if [ "$SCOPE" = "all" ] || [ "$SCOPE" = "project" ]; then
@@ -491,13 +513,20 @@ if [ "$SCOPE" = "all" ] || [ "$SCOPE" = "project" ]; then
     --argjson a "$proj_shared" \
     --argjson b "$proj_local" \
     '$a + $b')"
+  # Merge allowed dirs from both project settings files and deduplicate.
+  proj_shared_dirs="$(extract_allowed_dirs "$PROJECT_SETTINGS_SHARED")"
+  proj_local_dirs="$(extract_allowed_dirs "$PROJECT_SETTINGS_LOCAL")"
+  PROJECT_ALLOWED_DIRS="$(jq -cn \
+    --argjson a "$proj_shared_dirs" \
+    --argjson b "$proj_local_dirs" \
+    '$a + $b | unique')"
 fi
 
 USER_RULES="$(printf '%s' "$USER_RULES" | dedup_rules)"
 PROJECT_RULES="$(printf '%s' "$PROJECT_RULES" | dedup_rules)"
 
-USER_DOC="$(wrap_document "$USER_RULES")"
-PROJECT_DOC="$(wrap_document "$PROJECT_RULES")"
+USER_DOC="$(wrap_document "$USER_RULES" "$USER_ALLOWED_DIRS")"
+PROJECT_DOC="$(wrap_document "$PROJECT_RULES" "$PROJECT_ALLOWED_DIRS")"
 
 # ---------------------------------------------------------------------------
 # Dry-run: pretty-print the proposed output to stdout.

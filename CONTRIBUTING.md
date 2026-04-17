@@ -83,6 +83,55 @@ Non-breaking additions (new optional fields, new optional top-level keys) do not
 2. Cross-file checks (duplicates, conflicts, shadowing) live later in the script and operate on the merged rule set. Add new cross-file checks there.
 3. Add bats tests in `tests/verifier.bats` covering the success and failure case. Fixtures go in `tests/fixtures/`.
 
+## Extending the readonly command list
+
+The readonly auto-allow list lives in `hooks/common.sh` across three arrays:
+
+* `PASSTHRU_READONLY_COMMANDS` - simple commands using the generic safety regex (`^<cmd>(?:\s|$)[^<>()$\x60|{}&;\n\r]*$`). Add commands here when the generic regex is sufficient (no special flags or subcommands to worry about).
+* `PASSTHRU_READONLY_TWO_WORD_COMMANDS` - two-word commands like `docker ps` that use the same generic safety regex with the full two-word prefix.
+* `PASSTHRU_READONLY_CUSTOM_REGEXES` - full PCRE patterns for commands needing custom validation (e.g. `echo` rejects `$`/backticks, `find` rejects `-exec`/`-delete`, `jq` rejects `-f`/`--from-file`).
+
+To add a new readonly command:
+
+1. Decide which array it belongs in. Most simple commands go in `PASSTHRU_READONLY_COMMANDS`. Only use a custom regex when the generic safety pattern is insufficient.
+2. Add the entry to the appropriate array in `hooks/common.sh`.
+3. Add tests in `tests/hook_handler.bats` covering both the positive case (command auto-allowed) and the negative case (dangerous variant not auto-allowed).
+4. Run the full test suite: `bats tests/*.bats`.
+
+The list mirrors Claude Code's `readOnlyValidation.ts`. Check CC source when adding commands to keep the two lists in sync.
+
+## Extending the compound command splitter
+
+The compound command splitter (`split_bash_command` in `hooks/common.sh`) uses inline perl to tokenize Bash commands. It handles:
+
+* Single/double quotes, `$()` subshells (nested), backticks, backslash escaping
+* Splitting on unquoted `|`, `&&`, `||`, `;`, `&`
+* Stripping redirections (`>`, `>>`, `<`, `2>&1`, `N>file`)
+
+The per-segment matching algorithm (`match_all_segments` in `hooks/common.sh`) implements:
+
+* Deny: ANY segment matching a deny rule blocks the whole command
+* Allow: ALL segments must match. Different segments may match different rules
+* Ask: ANY segment matching ask (with no deny) triggers ask
+
+Tests live in `tests/command_splitting.bats` (splitter unit tests) and `tests/hook_handler.bats` (integration tests for compound matching in the hook).
+
+When modifying the splitter:
+
+1. Add tests in `tests/command_splitting.bats` first.
+2. The fail-safe behavior (parse errors return original command as one segment) must be preserved.
+3. The perl tokenizer handles all splitting and redirection stripping in a single process for performance.
+
+## Working with `allowed_dirs`
+
+The `allowed_dirs` field in passthru.json extends the set of trusted directories for path-based auto-allow. When adding or modifying `allowed_dirs` support:
+
+* `load_allowed_dirs` in `hooks/common.sh` reads all four rule files and returns a deduplicated JSON array. It is separate from `load_rules` to preserve the `{version, allow, deny, ask}` contract.
+* `_pm_path_inside_any_allowed` checks a path against both cwd and each allowed dir. It is used by `permission_mode_auto_allows` and `readonly_paths_allowed`.
+* `permission_mode_auto_allows` accepts an optional 5th parameter (`allowed_dirs_json`). Callers that do not pass it get the old behavior (cwd only).
+* `validate_rules` tolerates the `allowed_dirs` key and validates entries: must be an array of non-empty strings, rejects path traversal (`/../`).
+* Bootstrap imports `additionalAllowedWorkingDirs` from CC's `settings.json` via `extract_allowed_dirs` and writes them to `allowed_dirs` in `passthru.imported.json`.
+
 ## Branch policy
 
 `main` is protected on GitHub. All changes must go through pull requests. Direct pushes to `main` are blocked.
