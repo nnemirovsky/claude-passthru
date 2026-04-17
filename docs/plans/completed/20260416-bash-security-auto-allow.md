@@ -2,7 +2,7 @@
 
 ## Overview
 - Harden Bash command matching by splitting compound commands and matching each segment independently, mirroring Claude Code's approach
-- Auto-allow Agent and Skill tools as internal tools (explicit allow, not passthrough)
+- Auto-allow Agent, Skill, and Glob tools as internal tools (explicit allow, not passthrough)
 - Auto-allow read-only Bash commands (cat, head, tail, etc.) when path arguments are inside cwd or allowed dirs, using CC's safety regex pattern
 - Add `$` anchoring to overlay-proposed Bash regexes
 - Support additional allowed directories for path-based auto-allow (Read/Edit/Write/Grep/Glob/LS and readonly Bash commands)
@@ -16,7 +16,7 @@
 - passthru's `match_rule` currently matches the entire command string against regex. No splitting.
 - `overlay-propose-rule.sh` proposes `^<first_word>\s` for Bash. No `$` anchor. Bare commands (e.g. `ls`) don't match.
 - `permission_mode_auto_allows` only checks `$cwd`. CC also checks `additionalAllowedWorkingDirs`.
-- Internal tool pass-through list emits `{"continue": true}` for Skill (triggers CC's native prompt). Agent is not handled at all (falls through to overlay).
+- Internal tool pass-through list emits `{"continue": true}` for Skill (triggers CC's native prompt). Agent and Glob are not handled at all (fall through to overlay).
 
 ## Development Approach
 - **testing approach**: Regular (code first, then tests)
@@ -85,11 +85,11 @@ Path extraction: after matching the readonly regex, extract all non-flag tokens 
 
 Checked AFTER deny (deny always wins) and AFTER compound splitting (operates on segments). Checked BEFORE allow/ask document-order matching. This means deny rules can block read-only commands, but read-only commands don't need explicit allow rules.
 
-### Auto-allow Agent + Skill
-Add Agent and Skill to a new explicit-allow step early in the handler (before rule loading). Agent is not currently handled at all (falls through to overlay). Skill is currently in the internal tool passthrough list (emits `{"continue": true}`, which triggers CC's native "Use skill?" prompt). Both will emit `permissionDecision: "allow"` so CC never shows its own confirmation dialog. ToolSearch and the remaining CC-internal tools stay in the existing passthrough list.
+### Auto-allow Agent, Skill, and Glob
+Add Agent, Skill, and Glob to a new explicit-allow step early in the handler (before rule loading). Agent is not currently handled at all (falls through to overlay). Skill is currently in the internal tool passthrough list (emits `{"continue": true}`, which triggers CC's native "Use skill?" prompt). Glob is a file pattern matching tool that should be auto-allowed like Agent and Skill. All three will emit `permissionDecision: "allow"` so CC never shows its own confirmation dialog. ToolSearch and the remaining CC-internal tools stay in the existing passthrough list.
 
 ### Overlay proposal anchoring
-Change Bash proposals from `^<first_word>\s` to `^<first_word>(\s.*)?$`. This is fully anchored (both `^` and `$`) and handles bare commands (`ls`) and commands with args (`ls -la /tmp`).
+Change Bash proposals from `^<first_word>\s` to `^<first_word>(\s[^<>()$\x60|{}&;\n\r]*)?$`. This is fully anchored (both `^` and `$`), handles bare commands (`ls`) and commands with args (`ls -la /tmp`), and uses CC's safe character class to block compound command injection (e.g. `ls && evil` will not match a rule meant for `ls`).
 
 Read/Edit/Write proposals use `^<parent>/` (intentionally a prefix for path matching, no `$`). WebFetch/WebSearch proposals use `^https?://<host>` (intentionally a prefix for URL matching, no `$`). No changes needed for these.
 
@@ -149,25 +149,25 @@ Both authored and imported passthru.json files may declare `allowed_dirs`. `load
 - Modify: `hooks/common.sh` (add `split_bash_command` function)
 - Create: `tests/command_splitting.bats`
 
-- [ ] add `split_bash_command <command>` function to `hooks/common.sh` using inline perl
-- [ ] implement quote-aware splitting by `|`, `&&`, `||`, `;`, `&` (respect single/double quotes, `$()`, backticks, backslash escaping)
-- [ ] strip redirections (`>`, `>>`, `<`, `2>&1`, `2>/dev/null`) from each segment inside the perl tokenizer
-- [ ] output NUL-separated segments, filter empty segments
-- [ ] fail-safe: parse errors return original command as single segment
-- [ ] write tests for single commands (no split needed, returns 1 segment)
-- [ ] write tests for pipe splitting: `ls | head` -> `["ls", "head"]`
-- [ ] write tests for `&&` and `||` splitting
-- [ ] write tests for `;` and `&` splitting
-- [ ] write tests for quoted strings preserved: `echo 'foo && bar'` -> single segment
-- [ ] write tests for double-quoted strings preserved: `echo "foo | bar"` -> single segment
-- [ ] write tests for `$()` subshell preserved: `echo $(foo | bar)` -> single segment
-- [ ] write tests for nested subshell: `echo $(cat $(find . -name "*.txt"))` -> single segment
-- [ ] write tests for backtick subshell preserved: `` echo `foo | bar` `` -> single segment
-- [ ] write tests for redirection stripping: `ls > /tmp/out` -> `["ls"]`
-- [ ] write tests for stderr redirect stripping: `cmd 2>&1` -> `["cmd"]`
-- [ ] write tests for mixed: `curl url | head && echo done` -> `["curl url", "head", "echo done"]`
-- [ ] write test for parse failure fallback (malformed quoting returns original as single segment)
-- [ ] run tests - must pass before next task
+- [x] add `split_bash_command <command>` function to `hooks/common.sh` using inline perl
+- [x] implement quote-aware splitting by `|`, `&&`, `||`, `;`, `&` (respect single/double quotes, `$()`, backticks, backslash escaping)
+- [x] strip redirections (`>`, `>>`, `<`, `2>&1`, `2>/dev/null`) from each segment inside the perl tokenizer
+- [x] output NUL-separated segments, filter empty segments
+- [x] fail-safe: parse errors return original command as single segment
+- [x] write tests for single commands (no split needed, returns 1 segment)
+- [x] write tests for pipe splitting: `ls | head` -> `["ls", "head"]`
+- [x] write tests for `&&` and `||` splitting
+- [x] write tests for `;` and `&` splitting
+- [x] write tests for quoted strings preserved: `echo 'foo && bar'` -> single segment
+- [x] write tests for double-quoted strings preserved: `echo "foo | bar"` -> single segment
+- [x] write tests for `$()` subshell preserved: `echo $(foo | bar)` -> single segment
+- [x] write tests for nested subshell: `echo $(cat $(find . -name "*.txt"))` -> single segment
+- [x] write tests for backtick subshell preserved: `` echo `foo | bar` `` -> single segment
+- [x] write tests for redirection stripping: `ls > /tmp/out` -> `["ls"]`
+- [x] write tests for stderr redirect stripping: `cmd 2>&1` -> `["cmd"]`
+- [x] write tests for mixed: `curl url | head && echo done` -> `["curl url", "head", "echo done"]`
+- [x] write test for parse failure fallback (malformed quoting returns original as single segment)
+- [x] run tests - must pass before next task
 
 ### Task 2: Integrate splitter into pre-tool-use matching
 
@@ -176,16 +176,16 @@ Both authored and imported passthru.json files may declare `allowed_dirs`. `load
 - Modify: `hooks/common.sh` (add `match_all_segments` helper)
 - Modify: `tests/hook_handler.bats` (add compound command test cases)
 
-- [ ] add `match_all_segments <segments_array> <ordered_rules>` helper that implements the per-segment-first-match algorithm described in Solution Overview
-- [ ] in step 5 (deny matching): for Bash tool, split command into segments via `split_bash_command`, check each segment against deny rules. ANY segment matching deny -> deny whole command
-- [ ] in step 6 (allow/ask matching): for Bash tool with multiple segments, use `match_all_segments` instead of the current single-match loop. For single-segment commands, use the existing loop (no behavior change)
-- [ ] write tests: deny rule on second segment blocks compound command (`echo hello && rm -rf /` with deny on `^rm`)
-- [ ] write tests: allow rule on first segment only does NOT allow compound command
-- [ ] write tests: allow rules covering ALL segments allows compound command (two different rules covering two segments)
-- [ ] write tests: ask rule on any segment triggers ask for compound
-- [ ] write tests: one segment matches allow, another has no match -> falls through to overlay
-- [ ] write tests: single command (no operators) works identically to current behavior
-- [ ] run full test suite - must pass before next task
+- [x] add `match_all_segments <segments_array> <ordered_rules>` helper that implements the per-segment-first-match algorithm described in Solution Overview
+- [x] in step 5 (deny matching): for Bash tool, split command into segments via `split_bash_command`, check each segment against deny rules. ANY segment matching deny -> deny whole command
+- [x] in step 6 (allow/ask matching): for Bash tool with multiple segments, use `match_all_segments` instead of the current single-match loop. For single-segment commands, use the existing loop (no behavior change)
+- [x] write tests: deny rule on second segment blocks compound command (`echo hello && rm -rf /` with deny on `^rm`)
+- [x] write tests: allow rule on first segment only does NOT allow compound command
+- [x] write tests: allow rules covering ALL segments allows compound command (two different rules covering two segments)
+- [x] write tests: ask rule on any segment triggers ask for compound
+- [x] write tests: one segment matches allow, another has no match -> falls through to overlay
+- [x] write tests: single command (no operators) works identically to current behavior
+- [x] run full test suite - must pass before next task
 
 ### Task 3: Read-only Bash command auto-allow
 
@@ -194,43 +194,47 @@ Both authored and imported passthru.json files may declare `allowed_dirs`. `load
 - Modify: `hooks/handlers/pre-tool-use.sh` (add readonly check after deny, before allow/ask)
 - Modify: `tests/hook_handler.bats` (add readonly auto-allow tests)
 
-- [ ] add `PASSTHRU_READONLY_COMMANDS` array in `hooks/common.sh` mirroring CC's simple command list
-- [ ] add `PASSTHRU_READONLY_REGEXES` array for commands needing custom patterns (echo, pwd, ls, find, cd, jq, etc.)
-- [ ] add `is_readonly_command <segment>` function: iterates full PCRE list against the segment (not first-word lookup). Returns 0 if readonly, 1 otherwise
-- [ ] add `readonly_paths_allowed <segment> <cwd> <allowed_dirs_json>` function: extracts non-flag tokens, checks absolute paths against cwd + allowed dirs. Returns 0 if all paths allowed, 1 if any outside
-- [ ] for compound commands: split first (Task 1), then check ALL segments. All must be readonly AND have valid paths
-- [ ] insert readonly check in pre-tool-use.sh after deny (step 5) and before allow/ask (step 6). Operates on segments, not raw command
-- [ ] emit explicit allow with reason "passthru readonly: <cmd>" and audit source "passthru-readonly"
-- [ ] write tests: `cat src/main.rs` auto-allowed (relative path, inside cwd)
-- [ ] write tests: `cat /Users/me/project/src/main.rs` auto-allowed when cwd is `/Users/me/project`
-- [ ] write tests: `cat /etc/passwd` NOT auto-allowed (absolute path outside cwd)
-- [ ] write tests: `head -n 10 file.txt` auto-allowed (relative path)
-- [ ] write tests: `ls /Users/me/project/docs/` auto-allowed when cwd is `/Users/me/project`
-- [ ] write tests: `ls /tmp/random` NOT auto-allowed (outside cwd)
-- [ ] write tests: `cat file.txt | head` auto-allowed (both segments readonly, relative paths)
-- [ ] write tests: `cat file.txt | rm -rf /` NOT auto-allowed (rm is not readonly)
-- [ ] write tests: deny rule overrides readonly auto-allow
-- [ ] write tests: `echo "safe string"` auto-allowed, `echo $(dangerous)` not auto-allowed
-- [ ] write tests: `docker ps` matches `docker ps` regex, `docker exec` does NOT
-- [ ] write tests: readonly + allowed_dirs integration (path in allowed dir is auto-allowed)
-- [ ] run full test suite - must pass before next task
+- [x] add `PASSTHRU_READONLY_COMMANDS` array in `hooks/common.sh` mirroring CC's simple command list
+- [x] add `PASSTHRU_READONLY_REGEXES` array for commands needing custom patterns (echo, pwd, ls, find, cd, jq, etc.)
+- [x] add `is_readonly_command <segment>` function: iterates full PCRE list against the segment (not first-word lookup). Returns 0 if readonly, 1 otherwise
+- [x] add `readonly_paths_allowed <segment> <cwd> <allowed_dirs_json>` function: extracts non-flag tokens, checks absolute paths against cwd + allowed dirs. Returns 0 if all paths allowed, 1 if any outside
+- [x] for compound commands: split first (Task 1), then check ALL segments. All must be readonly AND have valid paths
+- [x] insert readonly check in pre-tool-use.sh after deny (step 5) and before allow/ask (step 6). Operates on segments, not raw command
+- [x] emit explicit allow with reason "passthru readonly: <cmd>" and audit source "passthru-readonly"
+- [x] write tests: `cat src/main.rs` auto-allowed (relative path, inside cwd)
+- [x] write tests: `cat /Users/me/project/src/main.rs` auto-allowed when cwd is `/Users/me/project`
+- [x] write tests: `cat /etc/passwd` NOT auto-allowed (absolute path outside cwd)
+- [x] write tests: `head -n 10 file.txt` auto-allowed (relative path)
+- [x] write tests: `ls /Users/me/project/docs/` auto-allowed when cwd is `/Users/me/project`
+- [x] write tests: `ls /tmp/random` NOT auto-allowed (outside cwd)
+- [x] write tests: `cat file.txt | head` auto-allowed (both segments readonly, relative paths)
+- [x] write tests: `cat file.txt | rm -rf /` NOT auto-allowed (rm is not readonly)
+- [x] write tests: deny rule overrides readonly auto-allow
+- [x] write tests: `echo "safe string"` auto-allowed, `echo $(dangerous)` not auto-allowed
+- [x] write tests: `docker ps` matches `docker ps` regex, `docker exec` does NOT
+- [x] write tests: readonly + allowed_dirs integration (path in allowed dir is auto-allowed)
+- [x] run full test suite - must pass before next task
 
-### Task 4: Auto-allow Agent and Skill tools
+### Task 4: Auto-allow Agent, Skill, and Glob tools
 
 **Files:**
-- Modify: `hooks/handlers/pre-tool-use.sh` (add Agent/Skill to explicit allow, remove Skill from passthrough list)
-- Modify: `tests/hook_handler.bats` (add Agent/Skill auto-allow tests)
+- Modify: `hooks/handlers/pre-tool-use.sh` (add Agent/Skill/Glob to explicit allow, remove Skill from passthrough list)
+- Modify: `tests/hook_handler.bats` (add Agent/Skill/Glob auto-allow tests)
 
-- [ ] add new step between current step 3 (plugin self-allow) and step 4 (load rules): internal tool explicit allow
-- [ ] emit `permissionDecision: "allow"` with reason "passthru internal: <tool>" for Agent and Skill
-- [ ] remove Skill from existing step 7 internal tool passthrough list (it moves to the new explicit allow step)
-- [ ] keep ToolSearch, TaskCreate, AskUserQuestion, and all other CC-internal tools in step 7 passthrough list
-- [ ] audit Agent and Skill as source "passthru-internal"
-- [ ] write tests: Agent tool call returns explicit allow decision (not passthrough)
-- [ ] write tests: Skill tool call returns explicit allow decision (not passthrough)
-- [ ] write tests: ToolSearch still returns passthrough (not allow)
-- [ ] write tests: TaskCreate still returns passthrough (not allow)
-- [ ] run full test suite - must pass before next task
+- [x] add new step between current step 3 (plugin self-allow) and step 4 (load rules): internal tool explicit allow
+- [x] emit `permissionDecision: "allow"` with reason "passthru internal: <tool>" for Agent, Skill, and Glob
+- [x] remove Skill from existing step 7 internal tool passthrough list (it moves to the new explicit allow step)
+- [x] keep ToolSearch, TaskCreate, AskUserQuestion, and all other CC-internal tools in step 7 passthrough list
+- [x] audit Agent, Skill, and Glob as source "passthru-internal"
+- [x] write tests: Agent tool call returns explicit allow decision (not passthrough)
+- [x] write tests: Skill tool call returns explicit allow decision (not passthrough)
+- [x] write tests: Glob tool call returns explicit allow decision (not passthrough)
+- [x] write tests: ToolSearch still returns passthrough (not allow)
+- [x] write tests: TaskCreate still returns passthrough (not allow)
+- [x] write tests: Agent/Skill/Glob audit logged with source passthru-internal
+- [x] write tests: Agent bypasses rule loading (works even with broken rules)
+- [x] write tests: Skill bypasses deny rules (checked before rule matching)
+- [x] run full test suite - must pass before next task
 
 ### Task 5: Anchor overlay-proposed Bash regexes
 
@@ -238,14 +242,14 @@ Both authored and imported passthru.json files may declare `allowed_dirs`. `load
 - Modify: `scripts/overlay-propose-rule.sh` (fix Bash category anchoring)
 - Modify: `tests/overlay.bats` (update/add overlay proposal tests)
 
-- [ ] change Bash category from `^<first_word>\s` to `^<first_word>(\s.*)?$`
-- [ ] this matches bare commands (`ls`), commands with args (`ls -la`), and is fully anchored
-- [ ] Read/Edit/Write proposals: intentionally left as prefix (`^<parent>/`), no change needed
-- [ ] WebFetch/WebSearch proposals: intentionally left as prefix (`^https?://<host>`), no change needed
-- [ ] write tests: proposed rule for `ls` matches `ls` and `ls -la` but not `ls && evil`
-- [ ] write tests: proposed rule for `git status` matches bare invocation
-- [ ] write tests: proposed rule for bare command (no args) matches exact command
-- [ ] run full test suite - must pass before next task
+- [x] change Bash category from `^<first_word>\s` to `^<first_word>(\s[safe-chars]*)?$` (uses CC-style safe character class `[^<>()$\x60|{}&;\n\r]` instead of `.*` to block compound operator injection)
+- [x] this matches bare commands (`ls`), commands with args (`ls -la`), and is fully anchored
+- [x] Read/Edit/Write proposals: intentionally left as prefix (`^<parent>/`), no change needed
+- [x] WebFetch/WebSearch proposals: intentionally left as prefix (`^https?://<host>`), no change needed
+- [x] write tests: proposed rule for `ls` matches `ls` and `ls -la` but not `ls && evil`
+- [x] write tests: proposed rule for `git status` matches bare invocation
+- [x] write tests: proposed rule for bare command (no args) matches exact command
+- [x] run full test suite - must pass before next task
 
 ### Task 6: Additional allowed directories
 
@@ -259,40 +263,40 @@ Both authored and imported passthru.json files may declare `allowed_dirs`. `load
 - Modify: `tests/bootstrap.bats` (add import tests)
 - Modify: `tests/verifier.bats` (add allowed_dirs validation tests)
 
-- [ ] add `load_allowed_dirs` function to `hooks/common.sh`: reads `allowed_dirs` from all four rule files, concatenates, deduplicates. Returns JSON array on stdout. Separate from `load_rules` to preserve `{version, allow, deny, ask}` contract
-- [ ] add `_pm_path_inside_any_allowed <path> <cwd> <allowed_dirs_json>` helper: checks path against cwd first, then each allowed dir. Returns 0 if inside any
-- [ ] update `permission_mode_auto_allows` to accept allowed dirs JSON as 5th parameter
-- [ ] update pre-tool-use.sh: call `load_allowed_dirs` once, pass result to `permission_mode_auto_allows` and readonly path validation
-- [ ] add bootstrap support: read `additionalAllowedWorkingDirs` from CC settings files (user + project), write to `allowed_dirs` in passthru.imported.json
-- [ ] update `validate_rules` to tolerate and validate `allowed_dirs` key: must be array of non-empty strings, reject path traversal (`/../`)
-- [ ] update docs/rule-format.md with `allowed_dirs` documentation
-- [ ] update CONTRIBUTING.md with guidance on `allowed_dirs` usage
-- [ ] write tests: Read tool auto-allowed for file in additional allowed dir
-- [ ] write tests: Write tool auto-allowed in acceptEdits mode for file in additional allowed dir
-- [ ] write tests: Grep tool auto-allowed for path in additional allowed dir
-- [ ] write tests: file outside all allowed dirs falls through to overlay
-- [ ] write tests: bootstrap imports additionalAllowedWorkingDirs from settings
-- [ ] write tests: verify.sh validates allowed_dirs field (valid array, rejects traversal)
-- [ ] write tests: verify.sh accepts passthru.json without allowed_dirs (backward compatible)
-- [ ] write tests: readonly auto-allow uses allowed dirs for path validation
-- [ ] run full test suite - must pass before next task
+- [x] add `load_allowed_dirs` function to `hooks/common.sh`: reads `allowed_dirs` from all four rule files, concatenates, deduplicates. Returns JSON array on stdout. Separate from `load_rules` to preserve `{version, allow, deny, ask}` contract
+- [x] add `_pm_path_inside_any_allowed <path> <cwd> <allowed_dirs_json>` helper: checks path against cwd first, then each allowed dir. Returns 0 if inside any
+- [x] update `permission_mode_auto_allows` to accept allowed dirs JSON as 5th parameter
+- [x] update pre-tool-use.sh: call `load_allowed_dirs` once, pass result to `permission_mode_auto_allows` and readonly path validation
+- [x] add bootstrap support: read `additionalAllowedWorkingDirs` from CC settings files (user + project), write to `allowed_dirs` in passthru.imported.json
+- [x] update `validate_rules` to tolerate and validate `allowed_dirs` key: must be array of non-empty strings, reject path traversal (`/../`)
+- [x] update docs/rule-format.md with `allowed_dirs` documentation
+- [x] update CONTRIBUTING.md with guidance on `allowed_dirs` usage
+- [x] write tests: Read tool auto-allowed for file in additional allowed dir
+- [x] write tests: Write tool auto-allowed in acceptEdits mode for file in additional allowed dir
+- [x] write tests: Grep tool auto-allowed for path in additional allowed dir
+- [x] write tests: file outside all allowed dirs falls through to overlay
+- [x] write tests: bootstrap imports additionalAllowedWorkingDirs from settings
+- [x] write tests: verify.sh validates allowed_dirs field (valid array, rejects traversal)
+- [x] write tests: verify.sh accepts passthru.json without allowed_dirs (backward compatible)
+- [x] write tests: readonly auto-allow uses allowed dirs for path validation
+- [x] run full test suite - must pass before next task
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] run full test suite: `bats tests/*.bats` - all pass
-- [ ] spot-check: compound command deny on any segment
-- [ ] spot-check: compound command allow requires all segments
-- [ ] spot-check: readonly `cat src/file` auto-allowed, `cat /etc/passwd` not
-- [ ] spot-check: Agent and Skill get explicit allow
-- [ ] spot-check: overlay proposals anchored with `$`
-- [ ] spot-check: additional allowed dirs work for path-based tools and readonly Bash
+- [x] run full test suite: `bats tests/*.bats` - all pass
+- [x] spot-check: compound command deny on any segment
+- [x] spot-check: compound command allow requires all segments
+- [x] spot-check: readonly `cat src/file` auto-allowed, `cat /etc/passwd` not
+- [x] spot-check: Agent and Skill get explicit allow
+- [x] spot-check: overlay proposals anchored with `$`
+- [x] spot-check: additional allowed dirs work for path-based tools and readonly Bash
 
 ### Task 8: [Final] Update documentation and release
 
-- [ ] update CLAUDE.md with new patterns (readonly auto-allow, compound splitting, allowed dirs)
-- [ ] update README.md with new features
-- [ ] update CONTRIBUTING.md with guidance on extending readonly command list and compound splitter
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update CLAUDE.md with new patterns (readonly auto-allow, compound splitting, allowed dirs)
+- [x] update README.md with new features
+- [x] update CONTRIBUTING.md with guidance on extending readonly command list and compound splitter
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

@@ -23,7 +23,14 @@ hooks/
                        SessionStart (timeout 5s, no matcher) handlers
   common.sh            shared library. Functions:
                          * load_rules / validate_rules (merge + schema-check)
+                         * load_allowed_dirs (read + deduplicate allowed_dirs from all rule files)
                          * pcre_match / match_rule / find_first_match (rule matching)
+                         * split_bash_command (compound command splitter via perl tokenizer)
+                         * match_all_segments (per-segment matching for compound Bash commands)
+                         * is_readonly_command / readonly_paths_allowed (readonly auto-allow)
+                         * _pm_path_inside_any_allowed (path validation against cwd + allowed dirs)
+                         * build_ordered_allow_ask (document-order allow/ask interleaving)
+                         * permission_mode_auto_allows (CC mode replication with allowed dirs)
                          * passthru_user_home, passthru_tmpdir, passthru_iso_ts,
                            passthru_sha256, sanitize_tool_use_id (env + path helpers)
                          * audit_enabled, audit_log_path, emit_passthrough
@@ -36,7 +43,9 @@ hooks/
                        Sourced by hook handlers AND by scripts/log.sh,
                        scripts/verify.sh, scripts/write-rule.sh.
   handlers/
-    pre-tool-use.sh    main hook: loads rules, matches, emits allow/deny/passthrough
+    pre-tool-use.sh    main hook: splits compound Bash commands, checks deny per segment,
+                       readonly auto-allow, allow/ask document-order matching (per-segment
+                       for compound commands), mode auto-allow with allowed dirs, overlay
     post-tool-use.sh   classifies successful native-dialog outcomes into asked_* events.
                        Delegates to classify_passthrough_outcome in common.sh.
     post-tool-use-failure.sh
@@ -71,8 +80,9 @@ scripts/
                        PASSTHRU_OVERLAY_TIMEOUT bounds the wait (default 60s).
   overlay-propose-rule.sh
                        regex proposer. Takes tool_name + tool_input JSON, emits a rule JSON
-                       targeting one of four categories (Bash prefix, Read/Edit/Write path,
-                       WebFetch URL host, MCP namespace). Unknown tool -> bare ^<Name>$ rule.
+                       targeting one of four categories (Bash fully-anchored with safe char class,
+                       Read/Edit/Write path prefix, WebFetch URL host, MCP namespace).
+                       Unknown tool -> bare ^<Name>$ rule.
   overlay-config.sh    overlay sentinel toggle + multiplexer detection reporter. Backs
                        /passthru:overlay.
 tests/
@@ -84,6 +94,8 @@ tests/
   post_tool_use_failure_hook.bats
                        PostToolUseFailure handler coverage (permission errors, generic
                        errored events, timeouts, interrupts, missing breadcrumb).
+  command_splitting.bats  split_bash_command + match_all_segments coverage (compound
+                       command splitting, redirection stripping, quote/subshell handling).
   *.bats               test suites (one per script or component).
 docs/
   rule-format.md       schema reference
@@ -244,6 +256,90 @@ Lower the PreToolUse timeout only after also lowering
 `PASSTHRU_OVERLAY_TIMEOUT` (and only after profiling on target hardware).
 Raising it is always safe since the handler fails open on timeout.
 
+## Compound command splitting
+
+For Bash tool calls, the hook splits compound commands into segments before
+matching. The splitter (`split_bash_command` in `hooks/common.sh`) uses
+inline perl to tokenize the command respecting single quotes, double quotes,
+`$()` subshells, backticks, and backslash escaping. It splits on unquoted
+`|`, `&&`, `||`, `;`, and `&`, and strips redirections (`>`, `>>`, `<`,
+`2>&1`, `N>file`) from each segment.
+
+Matching after splitting follows these rules:
+
+* **Deny**: each segment is checked against deny rules. ANY segment matching
+  a deny rule causes the whole command to be denied.
+* **Allow**: ALL segments must match allow rules (each segment may match a
+  different rule). If any segment has no match, the command falls through.
+* **Ask**: if any segment's first match is an ask rule (and no segment was
+  denied), the whole command triggers ask.
+
+Fail-safe: parse errors (unterminated quotes, etc.) return the original
+command as a single segment, preserving the pre-split behavior.
+
+The splitter always runs for Bash commands. Single commands (no operators)
+produce one segment and are matched identically to the previous behavior.
+
+## Readonly Bash command auto-allow
+
+After deny checking (deny always wins) and before allow/ask matching, the
+hook checks whether ALL segments of a Bash command are read-only. If so,
+the command is auto-allowed without needing explicit allow rules.
+
+The readonly command list mirrors Claude Code's `readOnlyValidation.ts`:
+
+* **Simple commands** (generic safety regex `^<cmd>(?:\s|$)[^<>()$\x60|{}&;\n\r]*$`):
+  `cal`, `uptime`, `cat`, `head`, `tail`, `wc`, `stat`, `strings`, `hexdump`,
+  `od`, `nl`, `id`, `uname`, `free`, `df`, `du`, `locale`, `groups`, `nproc`,
+  `basename`, `dirname`, `realpath`, `cut`, `paste`, `tr`, `column`, `tac`,
+  `rev`, `fold`, `expand`, `unexpand`, `fmt`, `comm`, `cmp`, `numfmt`,
+  `readlink`, `diff`, `true`, `false`, `sleep`, `which`, `type`, `expr`,
+  `test`, `getconf`, `seq`, `tsort`, `pr`
+* **Two-word commands** (same safety regex): `docker ps`, `docker images`
+* **Custom regex commands**: `echo` (no `$`/backticks), `pwd`, `whoami`,
+  `ls`, `find` (no `-exec`/`-delete`), `cd`, `jq` (no `-f`/`--from-file`),
+  `uniq`, `history`, `alias`, `arch`, `node -v`, `python --version`,
+  `python3 --version`
+
+**Path validation**: after a segment matches a readonly regex, all absolute
+path arguments are checked against cwd and allowed dirs via
+`_pm_path_inside_any_allowed`. Relative paths are assumed to resolve inside
+cwd. This prevents `cat /etc/passwd` from being auto-allowed while allowing
+`cat src/main.rs`.
+
+Auto-allowed commands are logged with source `passthru-readonly` and reason
+`readonly:<first-word>`.
+
+## Allowed directories
+
+The `allowed_dirs` field in passthru.json extends the trusted directory set
+for path-based auto-allow. It affects:
+
+* **Mode auto-allow** (`permission_mode_auto_allows`): Read/Edit/Write/Grep/
+  Glob/LS tools with paths in any allowed dir are treated the same as files
+  inside cwd.
+* **Readonly auto-allow** (`readonly_paths_allowed`): absolute path arguments
+  in read-only Bash commands are checked against cwd AND each allowed dir.
+
+`load_allowed_dirs` in `hooks/common.sh` reads `allowed_dirs` from all four
+rule files, concatenates, and deduplicates. It is separate from `load_rules`
+to preserve the `{version, allow, deny, ask}` contract. Bootstrap imports
+Claude Code's `additionalAllowedWorkingDirs` from settings and writes them
+to `allowed_dirs` in `passthru.imported.json`.
+
+See `docs/rule-format.md` for the schema and `CONTRIBUTING.md` for guidance
+on extending `allowed_dirs` support.
+
+## Internal tool auto-allow
+
+Agent, Skill, and Glob are always auto-allowed with an explicit `allow`
+decision (not passthrough). This runs before rule loading (step 3b in
+`pre-tool-use.sh`) so it is fast and cannot be affected by broken rule files.
+These tools are logged with source `passthru-internal`.
+
+ToolSearch, TaskCreate, and other CC-internal tools remain in the step 7
+passthrough list and emit `{"continue": true}`.
+
 ## Releases
 
 Use the `release-tools:new` skill (`/release-tools:new`) to cut a new release. The skill handles version calculation, the GitHub release, and the description prompt.
@@ -291,3 +387,6 @@ The release flow in one-line form:
 * Changing the overlay UI or keyboard flow: `scripts/overlay-dialog.sh` is the TUI, `scripts/overlay.sh` is the multiplexer dispatcher, and `scripts/overlay-propose-rule.sh` proposes the regex on A/D. Test via `PASSTHRU_OVERLAY_TEST_ANSWER`; see `tests/overlay.bats` for the stub-tmux pattern.
 * Changing ask-rule semantics: the merged document-order logic sits in `hooks/common.sh` (`find_first_match`) and `hooks/handlers/pre-tool-use.sh`. Ask rule parsing + validation is in `validate_rules` + `load_rules`. The verifier's conflict and shadowing checks in `scripts/verify.sh` must also cover `ask[]`.
 * Adding a new overlay multiplexer backend: add detection + launch lines in `scripts/overlay.sh` (search for the tmux / kitty / wezterm branches) and a stub fixture in `tests/fixtures/overlay/`. The shared detector helper lives in `hooks/common.sh` (`detect_overlay_multiplexer`).
+* Adding a new readonly command: add the command to `PASSTHRU_READONLY_COMMANDS` (simple), `PASSTHRU_READONLY_TWO_WORD_COMMANDS` (two-word), or `PASSTHRU_READONLY_CUSTOM_REGEXES` (custom regex) in `hooks/common.sh`. Test via `tests/hook_handler.bats`. See `CONTRIBUTING.md` section "Extending the readonly command list".
+* Changing compound command splitting: the splitter is `split_bash_command` in `hooks/common.sh` (inline perl). The per-segment matching logic is `match_all_segments` in the same file. Test via `tests/command_splitting.bats`.
+* Working with allowed dirs: see `CONTRIBUTING.md` section "Working with `allowed_dirs`". Key functions are `load_allowed_dirs`, `_pm_path_inside_any_allowed`, and `permission_mode_auto_allows` (5th parameter) in `hooks/common.sh`.

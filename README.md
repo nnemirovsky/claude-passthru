@@ -30,11 +30,15 @@ More examples: shape-matching a `gh api` endpoint across any owner/repo pair, al
 ## What you can do
 
 * **Regex-based Bash prefixes.** Auto-allow a directory of scripts, a shell pipeline, or any command family the native glob syntax cannot express.
+* **Compound command splitting.** `ls | head && echo done` is split into three segments. Each segment is matched independently. Deny on ANY segment blocks the whole command. Allow requires ALL segments to match. Mirrors Claude Code's `splitCommand()` approach.
+* **Read-only command auto-allow.** Common read-only commands (`cat`, `head`, `tail`, `ls`, `wc`, `stat`, `diff`, `jq`, etc.) are auto-allowed without explicit rules when their path arguments stay inside the working directory or allowed dirs. Mirrors Claude Code's `makeRegexForSafeCommand()` pattern.
 * **Shape-aware path and URL rules.** Match on the structure of a path or URL (e.g. `^gh api /repos/[^/]+/[^/]+/forks`) so you pin the endpoint, not the owner.
 * **MCP tool namespaces.** Allow a whole MCP server family with a single tool-regex rule, no need to enumerate every tool.
 * **Deny lists that win.** A matching deny rule unconditionally overrides any allow, so you can cement safety rules on top of a permissive allow set.
 * **Ask rules that route to the overlay (or native dialog as fallback).** Mark a tool shape as "always prompt me" via `ask[]`. Routes to the passthru overlay when enabled, falls back to Claude Code's native dialog otherwise.
-* **Terminal overlay for permission prompts with Y/A/N/D keyboard flow.** Inline TUI popup inside your tmux / kitty / wezterm session that intercepts permission prompts. Single-keystroke yes-once / yes-always / no-once / no-always. Escape drops through to the native dialog.
+* **Terminal overlay for permission prompts with Y/A/N/D keyboard flow.** Inline TUI popup inside your tmux / kitty / wezterm session that intercepts permission prompts. Single-keystroke yes-once / yes-always / no-once / no-always. Escape drops through to the native dialog. Proposed Bash rules are fully anchored with CC's safe character class to block compound operator injection.
+* **Additional allowed directories.** Extend the trusted directory set beyond cwd via `allowed_dirs` in passthru.json. Bootstrap imports Claude Code's `additionalAllowedWorkingDirs` automatically.
+* **Internal tool auto-allow.** Agent, Skill, and Glob are auto-allowed without rules or prompts. No more "Use skill?" confirmations.
 * **Opt-in audit log.** JSONL record of every decision (including what the native dialog did for passthroughs). Off by default, zero overhead when disabled.
 * **Standalone verifier.** Validate every rule file from the command line or via `/passthru:verify` to catch bad JSON, invalid regex, and allow/deny conflicts before they silently disable rules.
 * **First-run bootstrap.** One-shot `/passthru:bootstrap` command (or `scripts/bootstrap.sh` for scripting) that converts existing native `permissions.allow` entries into passthru rules. A `SessionStart` hint fires whenever `settings.json` has importable entries that are not yet in `passthru.imported.json` and auto-silences after the next bootstrap run.
@@ -85,6 +89,8 @@ Native rules solve the common case. They fall short when:
 * You want a deny list that unconditionally overrides a more permissive allow.
 
 `passthru` adds a thin regex layer in front of the native system. When a passthru rule matches, the hook emits a decision and Claude Code skips the permission dialog. When nothing matches, control passes through to the native rules unchanged. Nothing about your existing `settings.json` or `.claude/settings.local.json` changes.
+
+For Bash commands, passthru splits compound commands (piped, chained with `&&`/`||`/`;`/`&`) into segments and matches each one independently. Read-only commands (`cat`, `head`, `ls`, `wc`, etc.) are auto-allowed when their path arguments stay inside the working directory or configured allowed directories.
 
 Works across every tool Claude Code exposes (`Bash`, `PowerShell`, `Read`, `Edit`, `Write`, `WebFetch`, MCP tools, and so on).
 
@@ -294,16 +300,60 @@ The hook picks the first detected multiplexer whose binary is also on `$PATH`. I
 
 **When the overlay fires.** The hook runs the normal decision pipeline first. The overlay only fires when nothing else matched:
 
-1. `deny` rule match -> immediate deny, no overlay.
-2. `allow` rule match -> immediate allow, no overlay.
-3. `ask` rule match -> overlay (or native dialog as fallback). An ask-rule match wins over the permission-mode auto-allow shortcut below, because ask expresses explicit "prompt me" intent.
-4. No rule match -> check Claude Code's `permission_mode` auto-allow rules: `bypassPermissions` (everything), `acceptEdits` + Write/Edit within cwd, `default` + read tools (Read, Grep, Glob, NotebookRead, LS) within cwd, `plan` + read tools. If Claude Code would auto-allow, the hook lets the call through without prompting. Otherwise, overlay.
+1. `deny` rule match -> immediate deny, no overlay. For compound Bash commands, ANY segment matching deny blocks the whole command.
+2. Read-only auto-allow -> immediate allow, no overlay. ALL segments must be readonly with valid paths.
+3. `allow` rule match -> immediate allow, no overlay. For compound Bash commands, ALL segments must match.
+4. `ask` rule match -> overlay (or native dialog as fallback). An ask-rule match wins over the permission-mode auto-allow shortcut below, because ask expresses explicit "prompt me" intent.
+5. No rule match -> check Claude Code's `permission_mode` auto-allow rules: `bypassPermissions` (everything), `acceptEdits` + Write/Edit within cwd or allowed dirs, `default` + read tools (Read, Grep, Glob, NotebookRead, LS) within cwd or allowed dirs, `plan` + read tools. If Claude Code would auto-allow, the hook lets the call through without prompting. Otherwise, overlay.
 
 **Known limitations.**
 
-* The mode-based auto-allow replication is best-effort and errs on the conservative side. Claude Code resolves symlinks (`realpathSync`) and honors `additionalAllowedWorkingDirs`, sandbox allowlists, and internal-path predicates. The hook uses literal `$CWD/` prefix match and explicitly rejects `/../` traversal. Net effect: some calls Claude Code would auto-allow fall through to the overlay anyway (extra prompt, safe direction). No false auto-allows across the other direction.
+* The mode-based auto-allow replication is best-effort and errs on the conservative side. Claude Code resolves symlinks (`realpathSync`) and honors sandbox allowlists and internal-path predicates. The hook uses literal `$CWD/` prefix match, checks `allowed_dirs` (imported from Claude Code's `additionalAllowedWorkingDirs` via bootstrap), and explicitly rejects `/../` traversal. Net effect: some calls Claude Code would auto-allow fall through to the overlay anyway (extra prompt, safe direction). No false auto-allows across the other direction.
 * The overlay relies on your terminal multiplexer's popup API. In screen or plain bash without any multiplexer the hook falls through to the native dialog every time. That is fine. The overlay is a UX layer, not a policy layer.
 * Each overlay prompt has a 60-second timeout (`PASSTHRU_OVERLAY_TIMEOUT`, configurable). If you leave the popup idle for longer, the hook treats the prompt as cancelled and hands off to the native dialog.
+
+## Compound command splitting
+
+Bash commands containing pipes, logical operators, or semicolons are split into segments before matching. Each segment is matched independently against your rules.
+
+```
+echo hello && rm -rf /          # split into: ["echo hello", "rm -rf /"]
+cat file.txt | head -n 10       # split into: ["cat file.txt", "head -n 10"]
+ls > /tmp/out                   # split into: ["ls"] (redirections stripped)
+echo 'foo && bar'               # single segment (quoted operators preserved)
+```
+
+Matching rules for compound commands:
+
+* **Deny** on ANY segment blocks the whole command. A deny rule matching `^rm` on the second segment of `echo hello && rm -rf /` denies the entire command.
+* **Allow** requires ALL segments to match. Different segments may match different allow rules. If any segment has no matching allow rule, the command falls through to the overlay.
+* **Ask** on ANY segment (with no deny) triggers ask for the whole command.
+
+The splitter respects single quotes, double quotes, `$()` subshells, backticks, and backslash escaping. Parse failures (unterminated quotes, etc.) fall back to treating the whole command as a single segment, preserving the pre-split behavior.
+
+## Read-only command auto-allow
+
+Common read-only Bash commands are auto-allowed without explicit rules when their path arguments stay inside the working directory or configured allowed directories. This runs after deny checking (deny always wins) and before allow/ask rule matching.
+
+Auto-allowed commands include: `cat`, `head`, `tail`, `wc`, `stat`, `ls`, `diff`, `du`, `df`, `realpath`, `readlink`, `basename`, `dirname`, `find` (without `-exec`/`-delete`), `jq` (without `-f`/`--from-file`), `echo` (without `$`/backticks), `docker ps`, `docker images`, and more. The full list mirrors Claude Code's `readOnlyValidation.ts`.
+
+**Path validation.** After a command matches the readonly pattern, all absolute path arguments are checked:
+
+* Absolute paths starting with `/` must be inside cwd or an `allowed_dirs` entry.
+* Relative paths (no leading `/`) are assumed to resolve inside cwd and are allowed.
+* Flag arguments (starting with `-`) are skipped.
+
+Examples:
+
+```
+cat src/main.rs                 # auto-allowed (relative path)
+cat /Users/me/project/file.txt  # auto-allowed when cwd is /Users/me/project
+cat /etc/passwd                 # NOT auto-allowed (outside cwd)
+cat file.txt | head -n 10       # auto-allowed (both segments readonly, relative paths)
+cat file.txt | rm -rf /         # NOT auto-allowed (rm is not readonly)
+```
+
+A deny rule always overrides readonly auto-allow. If you deny `^cat`, then `cat src/main.rs` is denied even though `cat` is readonly.
 
 ## Ask rules
 
