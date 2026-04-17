@@ -53,6 +53,24 @@ Use `ask[]` when you want explicit prompts for a tool call rather than either si
 
 All of `allow`, `deny`, and `ask` default to empty arrays when missing.
 
+### `allowed_dirs` (array, optional)
+
+Array of absolute directory paths that extend the set of trusted locations for path-based auto-allow checks. When present, Read/Edit/Write/Grep/Glob/LS tools operating on files inside any `allowed_dirs` entry are treated the same as files inside the working directory for mode-based auto-allow. Read-only Bash commands (`cat`, `head`, `ls`, etc.) also check `allowed_dirs` when validating absolute path arguments.
+
+```json
+{
+  "version": 2,
+  "allowed_dirs": ["/opt/shared-data", "/home/user/reference"],
+  "allow": [],
+  "deny": [],
+  "ask": []
+}
+```
+
+Both authored and imported rule files may declare `allowed_dirs`. During loading, arrays from all four rule files are concatenated and deduplicated. Bootstrap imports Claude Code's `additionalAllowedWorkingDirs` from `settings.json` and writes them to `allowed_dirs` in `passthru.imported.json`.
+
+Each entry must be a non-empty string. Paths containing `/../` (path traversal) are rejected by the verifier. Files without `allowed_dirs` are backward compatible (treated as an empty array).
+
 ## Rule object fields
 
 Each entry in `allow[]`, `deny[]`, or `ask[]` is an object with these fields. At least one of `tool` or `match` is required.

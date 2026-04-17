@@ -572,6 +572,134 @@ EOF
   [[ "$output" == *"files"* ]]
 }
 
+# ---------------------------------------------------------------------------
+# allowed_dirs validation
+# ---------------------------------------------------------------------------
+
+@test "allowed_dirs: valid array accepted" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allowed_dirs": ["/opt/shared", "/data/reference"],
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]"* ]]
+}
+
+@test "allowed_dirs: passthru.json without allowed_dirs is backward compatible" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]"* ]]
+}
+
+@test "allowed_dirs: non-array type -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allowed_dirs": "/opt/shared",
+  "allow": [],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed_dirs"* ]]
+  [[ "$output" == *"array"* ]]
+}
+
+@test "allowed_dirs: non-string entry -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allowed_dirs": [123, "/valid"],
+  "allow": [],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed_dirs"* ]]
+  [[ "$output" == *"string"* ]]
+}
+
+@test "allowed_dirs: empty string entry -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allowed_dirs": [""],
+  "allow": [],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed_dirs"* ]]
+  [[ "$output" == *"non-empty"* ]]
+}
+
+@test "allowed_dirs: path traversal (/../) -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allowed_dirs": ["/opt/../etc/passwd"],
+  "allow": [],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed_dirs"* ]]
+  [[ "$output" == *"traversal"* ]]
+}
+
+@test "allowed_dirs: relative path -> error" {
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allowed_dirs": ["relative/path"],
+  "allow": [],
+  "deny": [],
+  "ask": []
+}
+EOF
+  run bash -c "bash '$VERIFY' 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"allowed_dirs"* ]]
+  [[ "$output" == *"absolute path"* ]]
+}
+
+@test "allowed_dirs: v1 file with allowed_dirs is still accepted" {
+  # allowed_dirs is not version-gated, works with v1 too.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 1,
+  "allowed_dirs": ["/opt/shared"],
+  "allow": [{"tool":"Bash","match":{"command":"^ls"}}],
+  "deny": []
+}
+EOF
+  run_verify
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[OK]"* ]]
+}
+
 @test "report format: plain failure includes severity + file + message" {
   place "$USER_ROOT/.claude/passthru.json" "invalid-regex.json"
   run bash -c "bash '$VERIFY' 2>&1"

@@ -338,6 +338,20 @@ if [ "$TOOL_NAME" = "Bash" ]; then
   fi
 fi
 
+# --- 3b. Internal tool explicit allow --------------------------------------
+# Agent, Skill, and Glob are Claude Code internals that passthru always allows.
+# They emit a real "allow" decision (not passthrough) so CC never shows its own
+# confirmation dialog. This step runs before rule loading so it is fast and
+# cannot be affected by broken rule files. ToolSearch and other CC-internal
+# tools stay in the step 7 passthrough list (they use {"continue": true}).
+case "$TOOL_NAME" in
+  Agent|Skill|Glob)
+    emit_decision "allow" "passthru internal: ${TOOL_NAME}"
+    audit_write_line "allow" "$TOOL_NAME" "passthru internal: ${TOOL_NAME}" "" "" "$TOOL_USE_ID" "passthru-internal"
+    exit 0
+    ;;
+esac
+
 # --- 4. Load + validate rules ----------------------------------------------
 # load_rules or validate_rules failure -> fail open with stderr diagnostic.
 # Capture stdout directly; load_rules sends parse errors to stderr (which we
@@ -362,19 +376,33 @@ if ! validate_rules "$MERGED" 2>/dev/null; then
   exit 0
 fi
 
+# --- 4a. Load allowed dirs ------------------------------------------------
+# Load additional allowed directories from rule files. This is separate from
+# load_rules to preserve the {version, allow, deny, ask} contract. The result
+# is passed to permission_mode_auto_allows and readonly path validation.
+ALLOWED_DIRS_JSON="$(load_allowed_dirs 2>/dev/null || printf '[]')"
+
+# --- 4b. Split Bash compound commands into segments -----------------------
+# For Bash tool calls, split the command into segments (subcommands) so each
+# segment is matched independently. Non-Bash tools skip this step and use
+# single-segment matching (current behavior preserved).
+BASH_SEGMENTS=()
+BASH_SEGMENT_COUNT=0
+if [ "$TOOL_NAME" = "Bash" ]; then
+  BASH_CMD="$(jq -r '.command // ""' <<<"$TOOL_INPUT" 2>/dev/null)"
+  if [ -n "$BASH_CMD" ]; then
+    while IFS= read -r -d '' _seg; do
+      BASH_SEGMENTS+=("$_seg")
+    done < <(split_bash_command "$BASH_CMD")
+    BASH_SEGMENT_COUNT="${#BASH_SEGMENTS[@]}"
+  fi
+fi
+
 # --- 5. Match deny first ---------------------------------------------------
+# For Bash compound commands, check EACH segment against deny rules.
+# ANY segment matching deny -> deny the whole command.
 DENY_RULES="$(jq -c '.deny // []' <<<"$MERGED" 2>/dev/null)"
 [ -z "$DENY_RULES" ] && DENY_RULES='[]'
-
-DENY_HIT=""
-if DENY_HIT="$(find_first_match "$DENY_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
-  :  # normal path
-else
-  # rc=2 (bad regex). Fail open.
-  printf '[passthru] deny rule regex error; passing through\n' >&2
-  emit_passthrough
-  exit 0
-fi
 
 # rule_pattern_summary: emit a human-readable summary of the rule's pattern
 # field for log output. Format:
@@ -394,6 +422,36 @@ rule_pattern_summary() {
   ' <<<"$rule" 2>/dev/null
 }
 
+DENY_HIT=""
+if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 1 ]; then
+  # Compound command: check each segment independently against deny rules.
+  for _seg in "${BASH_SEGMENTS[@]}"; do
+    _seg_input="$(jq -cn --arg c "$_seg" '{command: $c}')"
+    _seg_deny=""
+    if _seg_deny="$(find_first_match "$DENY_RULES" "$TOOL_NAME" "$_seg_input" 2>/dev/null)"; then
+      :
+    else
+      printf '[passthru] deny rule regex error; passing through\n' >&2
+      emit_passthrough
+      exit 0
+    fi
+    if [ -n "$_seg_deny" ]; then
+      DENY_HIT="$_seg_deny"
+      break
+    fi
+  done
+else
+  # Single command or non-Bash tool: original behavior.
+  if DENY_HIT="$(find_first_match "$DENY_RULES" "$TOOL_NAME" "$TOOL_INPUT" 2>/dev/null)"; then
+    :  # normal path
+  else
+    # rc=2 (bad regex). Fail open.
+    printf '[passthru] deny rule regex error; passing through\n' >&2
+    emit_passthrough
+    exit 0
+  fi
+fi
+
 if [ -n "$DENY_HIT" ]; then
   # find_first_match returns "<index>\t<rule-json>" so we split here.
   DENY_IDX="${DENY_HIT%%$'\t'*}"
@@ -408,6 +466,40 @@ if [ -n "$DENY_HIT" ]; then
   emit_decision "deny" "$MSG"
   audit_write_line "deny" "$TOOL_NAME" "$REASON" "$DENY_IDX" "$PATTERN" "$TOOL_USE_ID"
   exit 0
+fi
+
+# --- 5b. Read-only Bash command auto-allow ---------------------------------
+# After deny (deny always wins), check if ALL segments are read-only commands
+# with valid paths. If so, emit an explicit allow. This runs before allow/ask
+# matching so read-only commands do not need explicit allow rules.
+#
+# Guard: if the ORIGINAL command (pre-split) contains unquoted redirects
+# (> >> or <), skip readonly auto-allow entirely. split_bash_command strips
+# redirections from segments, so `cat file > /tmp/out` becomes `cat file`
+# and `wc < /etc/passwd` becomes `wc`. Both would pass is_readonly_command
+# and readonly_paths_allowed. But CC executes the original command with the
+# redirect, so the actual I/O differs from what the segment shows.
+if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 0 ] \
+   && ! has_redirect "$BASH_CMD"; then
+  _all_readonly=1
+  for _seg in "${BASH_SEGMENTS[@]}"; do
+    if ! is_readonly_command "$_seg"; then
+      _all_readonly=0
+      break
+    fi
+    if ! readonly_paths_allowed "$_seg" "$CC_CWD" "$ALLOWED_DIRS_JSON"; then
+      _all_readonly=0
+      break
+    fi
+  done
+  if [ "$_all_readonly" -eq 1 ]; then
+    # Extract the first word of the first segment for the reason message.
+    _ro_first="${BASH_SEGMENTS[0]%% *}"
+    MSG="passthru readonly: ${_ro_first}"
+    emit_decision "allow" "$MSG"
+    audit_write_line "allow" "$TOOL_NAME" "readonly:${_ro_first}" "" "" "$TOOL_USE_ID" "passthru-readonly"
+    exit 0
+  fi
 fi
 
 # --- 6. Match allow + ask in document order --------------------------------
@@ -425,6 +517,11 @@ fi
 #   4. no match + mode auto-allows -> passthrough (CC handles it).
 #   5. no match + mode does NOT auto-allow -> overlay path.
 #
+# For compound Bash commands (multi-segment): use match_all_segments which
+# checks each segment independently. ALL segments must match for allow;
+# ANY segment matching ask triggers ask; ANY segment without a match falls
+# through.
+#
 # We set OVERLAY_REASON when we decide overlay is the next step. Empty =>
 # no overlay needed. Carries the audit reason / pattern / rule_index through
 # to the overlay-result dispatch.
@@ -440,54 +537,98 @@ ORDERED_COUNT="$(jq -r 'if type == "array" then length else 0 end' <<<"$ORDERED"
 
 MATCHED=""   # "allow" | "ask" | ""
 if [ "$ORDERED_COUNT" -gt 0 ]; then
-  i=0
-  while [ "$i" -lt "$ORDERED_COUNT" ]; do
-    ENTRY="$(jq -c --argjson i "$i" '.[$i]' <<<"$ORDERED" 2>/dev/null)"
-    LIST_TYPE="$(jq -r '.list // ""' <<<"$ENTRY" 2>/dev/null)"
-    RULE="$(jq -c '.rule // {}' <<<"$ENTRY" 2>/dev/null)"
-    RULE_IDX="$(jq -r '.merged_idx // 0' <<<"$ENTRY" 2>/dev/null)"
-
-    # Catch match_rule's return code without letting `set -e` abort the loop
-    # on the expected "no match" (rc=1) path.
-    mrc=0
-    match_rule "$TOOL_NAME" "$TOOL_INPUT" "$RULE" || mrc=$?
-    if [ "$mrc" -eq 2 ]; then
-      # Invalid regex in allow/ask rule. Fail open so a single bad rule
-      # cannot block every tool call.
-      printf '[passthru] %s rule regex error; passing through\n' "$LIST_TYPE" >&2
+  if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 1 ]; then
+    # Compound Bash command: use per-segment matching algorithm.
+    _MAS_RESULT=""
+    _mas_rc=0
+    _MAS_RESULT="$(match_all_segments "$ORDERED" "$TOOL_NAME" "${BASH_SEGMENTS[@]}" 2>/dev/null)" || _mas_rc=$?
+    if [ "$_mas_rc" -eq 2 ]; then
+      printf '[passthru] compound allow/ask rule regex error; passing through\n' >&2
       emit_passthrough
       exit 0
     fi
-    if [ "$mrc" -eq 0 ]; then
-      MATCHED="$LIST_TYPE"
-      REASON="$(jq -r '.reason // ""' <<<"$RULE" 2>/dev/null)"
-      PATTERN="$(rule_pattern_summary "$RULE")"
+    if [ -n "$_MAS_RESULT" ]; then
+      # Parse TAB-separated: decision\tlist_type\tmerged_idx\trule_json
+      _MAS_DECISION="${_MAS_RESULT%%$'\t'*}"
+      _MAS_REST="${_MAS_RESULT#*$'\t'}"
+      _MAS_REST2="${_MAS_REST#*$'\t'}"
+      _MAS_RULE_IDX="${_MAS_REST2%%$'\t'*}"
+      _MAS_RULE="${_MAS_REST2#*$'\t'}"
+
+      REASON="$(jq -r '.reason // ""' <<<"$_MAS_RULE" 2>/dev/null)"
+      PATTERN="$(rule_pattern_summary "$_MAS_RULE")"
       OVERLAY_REASON="$REASON"
-      OVERLAY_RULE_IDX="$RULE_IDX"
+      OVERLAY_RULE_IDX="$_MAS_RULE_IDX"
       OVERLAY_PATTERN="$PATTERN"
-      if [ "$LIST_TYPE" = "allow" ]; then
+
+      if [ "$_MAS_DECISION" = "allow" ]; then
+        MATCHED="allow"
         if [ -n "$REASON" ]; then
           MSG="passthru allow: ${REASON}"
         else
           MSG="passthru allow: matched rule [${PATTERN}]"
         fi
         emit_decision "allow" "$MSG"
-        audit_write_line "allow" "$TOOL_NAME" "$REASON" "$RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
+        audit_write_line "allow" "$TOOL_NAME" "$REASON" "$_MAS_RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
+        exit 0
+      elif [ "$_MAS_DECISION" = "ask" ]; then
+        MATCHED="ask"
+        # Falls through to the overlay path below.
+      fi
+    fi
+    # No match or empty result: MATCHED stays "" -> falls through to overlay.
+  else
+    # Single command or non-Bash tool: existing document-order walk.
+    i=0
+    while [ "$i" -lt "$ORDERED_COUNT" ]; do
+      ENTRY="$(jq -c --argjson i "$i" '.[$i]' <<<"$ORDERED" 2>/dev/null)"
+      LIST_TYPE="$(jq -r '.list // ""' <<<"$ENTRY" 2>/dev/null)"
+      RULE="$(jq -c '.rule // {}' <<<"$ENTRY" 2>/dev/null)"
+      RULE_IDX="$(jq -r '.merged_idx // 0' <<<"$ENTRY" 2>/dev/null)"
+
+      # Catch match_rule's return code without letting `set -e` abort the loop
+      # on the expected "no match" (rc=1) path.
+      mrc=0
+      match_rule "$TOOL_NAME" "$TOOL_INPUT" "$RULE" || mrc=$?
+      if [ "$mrc" -eq 2 ]; then
+        # Invalid regex in allow/ask rule. Fail open so a single bad rule
+        # cannot block every tool call.
+        printf '[passthru] %s rule regex error; passing through\n' "$LIST_TYPE" >&2
+        emit_passthrough
         exit 0
       fi
-      # ask match: break out of the loop and head to the overlay path.
-      break
-    fi
-    i=$((i + 1))
-  done
+      if [ "$mrc" -eq 0 ]; then
+        MATCHED="$LIST_TYPE"
+        REASON="$(jq -r '.reason // ""' <<<"$RULE" 2>/dev/null)"
+        PATTERN="$(rule_pattern_summary "$RULE")"
+        OVERLAY_REASON="$REASON"
+        OVERLAY_RULE_IDX="$RULE_IDX"
+        OVERLAY_PATTERN="$PATTERN"
+        if [ "$LIST_TYPE" = "allow" ]; then
+          if [ -n "$REASON" ]; then
+            MSG="passthru allow: ${REASON}"
+          else
+            MSG="passthru allow: matched rule [${PATTERN}]"
+          fi
+          emit_decision "allow" "$MSG"
+          audit_write_line "allow" "$TOOL_NAME" "$REASON" "$RULE_IDX" "$PATTERN" "$TOOL_USE_ID"
+          exit 0
+        fi
+        # ask match: break out of the loop and head to the overlay path.
+        break
+      fi
+      i=$((i + 1))
+    done
+  fi
 fi
 
 # --- 7. Internal tool pass-through -----------------------------------------
 # Some tools are Claude Code internals (schema loading, task management, etc.)
 # that should never trigger the overlay. Pass them through unconditionally.
+# Agent, Skill, and Glob are handled earlier (step 3b) with explicit allow.
 if [ "$MATCHED" != "ask" ]; then
   case "$TOOL_NAME" in
-    ToolSearch|Skill|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|\
+    ToolSearch|TaskCreate|TaskUpdate|TaskGet|TaskList|TaskOutput|TaskStop|\
     AskUserQuestion|SendMessage|EnterPlanMode|ExitPlanMode|ScheduleWakeup|\
     CronCreate|CronDelete|CronList|Monitor|LSP|RemoteTrigger|\
     EnterWorktree|ExitWorktree|TeamCreate|TeamDelete)
@@ -504,7 +645,7 @@ fi
 # does not fire for routine operations. Passthru emits allow (not continue),
 # keeping the decision on our side rather than falling through to CC.
 if [ "$MATCHED" != "ask" ]; then
-  if permission_mode_auto_allows "$PERMISSION_MODE" "$TOOL_NAME" "$TOOL_INPUT" "$CC_CWD" 2>/dev/null; then
+  if permission_mode_auto_allows "$PERMISSION_MODE" "$TOOL_NAME" "$TOOL_INPUT" "$CC_CWD" "$ALLOWED_DIRS_JSON" 2>/dev/null; then
     MSG="passthru mode-allow: ${PERMISSION_MODE:-default}"
     emit_decision "allow" "$MSG"
     audit_write_line "allow" "$TOOL_NAME" "mode:${PERMISSION_MODE:-default}" "" "" "$TOOL_USE_ID" "passthru-mode"

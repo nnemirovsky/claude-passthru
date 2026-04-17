@@ -262,7 +262,7 @@ restricted_path() {
 # overlay-propose-rule.sh category coverage
 # ===========================================================================
 
-@test "propose-rule: Bash command -> ^<first-word>\\s match" {
+@test "propose-rule: Bash command -> fully anchored safe-char match" {
   run bash "$PROPOSER" "Bash" '{"command":"gh api /repos/foo"}'
   [ "$status" -eq 0 ]
   run jq -r '.tool' <<<"$output"
@@ -270,14 +270,16 @@ restricted_path() {
   # Re-run to grab match.command.
   run bash "$PROPOSER" "Bash" '{"command":"gh api /repos/foo"}'
   run jq -r '.match.command' <<<"$output"
-  [ "$output" = "^gh\\s" ]
+  # Pattern uses CC-style safe character class, no shell operators allowed.
+  # The \$ inside the character class is valid PCRE (literal dollar).
+  [ "$output" = '^gh(\s[^<>()\$\x60|{}&;\n\r]*)?$' ]
 }
 
 @test "propose-rule: Bash rm command keeps first token" {
   run bash "$PROPOSER" "Bash" '{"command":"rm -rf /tmp/foo"}'
   [ "$status" -eq 0 ]
   run jq -r '.match.command' <<<"$output"
-  [ "$output" = "^rm\\s" ]
+  [ "$output" = '^rm(\s[^<>()\$\x60|{}&;\n\r]*)?$' ]
 }
 
 @test "propose-rule: Read file_path -> parent-dir prefix match" {
@@ -356,6 +358,58 @@ restricted_path() {
   [ "$status" -eq 0 ]
   run jq -r '.tool' <<<"$output"
   [ "$output" = "^Read$" ]
+}
+
+# ===========================================================================
+# overlay-propose-rule.sh: Bash anchoring validation
+# ===========================================================================
+
+@test "propose-rule: Bash proposed regex matches bare command (ls)" {
+  run bash "$PROPOSER" "Bash" '{"command":"ls"}'
+  [ "$status" -eq 0 ]
+  local pat
+  pat="$(jq -r '.match.command' <<<"$output")"
+  # The pattern must match bare "ls" (no args).
+  run perl -e "exit('ls' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
+  # Must also match "ls -la".
+  run perl -e "exit('ls -la' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
+  # Must NOT match "ls && evil" (compound command leaking past anchor).
+  run perl -e "exit('ls && evil' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 1 ]
+}
+
+@test "propose-rule: Bash proposed regex for 'git status' matches bare invocation" {
+  run bash "$PROPOSER" "Bash" '{"command":"git status"}'
+  [ "$status" -eq 0 ]
+  local pat
+  pat="$(jq -r '.match.command' <<<"$output")"
+  # Must match bare "git" (just the first word).
+  run perl -e "exit('git' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
+  # Must match "git status".
+  run perl -e "exit('git status' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
+  # Must match "git log --oneline".
+  run perl -e "exit('git log --oneline' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
+}
+
+@test "propose-rule: Bash proposed regex for bare command (no args) matches exact command" {
+  run bash "$PROPOSER" "Bash" '{"command":"whoami"}'
+  [ "$status" -eq 0 ]
+  local pat
+  pat="$(jq -r '.match.command' <<<"$output")"
+  # Must match bare "whoami".
+  run perl -e "exit('whoami' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
+  # Must NOT match "whoami; evil".
+  run perl -e "exit('whoami; evil' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 1 ]
+  # Must match "whoami --help" (has args after whitespace).
+  run perl -e "exit('whoami --help' =~ /$pat/ ? 0 : 1)"
+  [ "$status" -eq 0 ]
 }
 
 # ===========================================================================

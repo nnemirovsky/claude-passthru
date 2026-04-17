@@ -831,6 +831,63 @@ EOF
   done
 }
 
+# ---------------------------------------------------------------------------
+# additionalAllowedWorkingDirs import
+# ---------------------------------------------------------------------------
+
+@test "bootstrap: imports additionalAllowedWorkingDirs from user settings" {
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{
+  "permissions": {"allow": ["Bash(ls:*)"]},
+  "env": {"additionalAllowedWorkingDirs": ["/opt/shared", "/data/reference"]}
+}
+EOF
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  [ -f "$(user_imported)" ]
+  # Check that allowed_dirs are present in the imported file.
+  run jq -r '.allowed_dirs | length' "$(user_imported)"
+  [ "$output" = "2" ]
+  run jq -r '.allowed_dirs[0]' "$(user_imported)"
+  [ "$output" = "/opt/shared" ]
+  run jq -r '.allowed_dirs[1]' "$(user_imported)"
+  [ "$output" = "/data/reference" ]
+}
+
+@test "bootstrap: no additionalAllowedWorkingDirs -> no allowed_dirs key in output" {
+  cat > "$USER_ROOT/.claude/settings.json" <<'EOF'
+{"permissions": {"allow": ["Bash(ls:*)"]}}
+EOF
+  run_boot --user-only --write
+  [ "$status" -eq 0 ]
+  # allowed_dirs should NOT be present.
+  run jq 'has("allowed_dirs")' "$(user_imported)"
+  [ "$output" = "false" ]
+}
+
+@test "bootstrap: project scope merges allowed dirs from shared + local settings" {
+  cat > "$PROJ_ROOT/.claude/settings.json" <<'EOF'
+{
+  "permissions": {"allow": []},
+  "env": {"additionalAllowedWorkingDirs": ["/opt/shared"]}
+}
+EOF
+  cat > "$PROJ_ROOT/.claude/settings.local.json" <<'EOF'
+{
+  "permissions": {"allow": []},
+  "env": {"additionalAllowedWorkingDirs": ["/opt/shared", "/data/local"]}
+}
+EOF
+  run_boot --project-only --write
+  [ "$status" -eq 0 ]
+  # Deduplicated: /opt/shared appears once, /data/local once.
+  run jq -r '.allowed_dirs | length' "$(proj_imported)"
+  [ "$output" = "2" ]
+  # Both dirs present (order from jq unique is sorted).
+  run jq -r '.allowed_dirs | sort | join(",")' "$(proj_imported)"
+  [ "$output" = "/data/local,/opt/shared" ]
+}
+
 @test "bootstrap: re-running --write is idempotent at the hash level" {
   printf '%s\n' '{"permissions":{"allow":["Bash(ls:*)","Bash(echo hello)"]}}' \
     > "$USER_ROOT/.claude/settings.json"

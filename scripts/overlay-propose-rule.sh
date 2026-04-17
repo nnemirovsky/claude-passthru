@@ -12,7 +12,7 @@
 #
 # Categories:
 #   1. Bash(command=...)                 -> tool: "Bash", match.command:
-#                                           "^<first-word>\\s"
+#                                           "^<first-word>(\\s[safe]*)?\$"
 #   2. Read/Edit/Write(file_path=...)    -> tool: "^(Read|Edit|Write)$",
 #                                           match.file_path: "^<parent-dir>"
 #   3. WebFetch/WebSearch(url=...)       -> tool: "^(WebFetch|WebSearch)$",
@@ -93,7 +93,11 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     emit_fallback
     exit 0
   fi
-  pattern="^$(escape_regex "$first_word")\\s"
+  # Fully-anchored pattern: ^cmd(\s[safe-chars])?$ where safe-chars
+  # mirrors CC's makeRegexForSafeCommand character class (no shell
+  # operators, no expansion triggers). This prevents compound command
+  # injection (e.g. "ls && evil") from matching a rule meant for "ls".
+  pattern="^$(escape_regex "$first_word")(\\s[^<>()\\$\x60|{}&;\\n\\r]*)?\$"
   jq -cn --arg tool "Bash" --arg pat "$pattern" \
     '{tool: $tool, match: {command: $pat}}'
   exit 0
