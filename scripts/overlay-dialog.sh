@@ -184,13 +184,66 @@ selected=0
 # Build a human-readable preview from tool_input. Each tool type gets a
 # tailored display. MCP tools show pretty JSON. Edits show a diff preview.
 _extract() { jq -r --arg f "$1" '.[$f] // empty' <<<"$TOOL_INPUT_JSON" 2>/dev/null; }
-_truncate() {
-  local s="$1" max="${2:-120}"
-  if [ "${#s}" -gt "$max" ]; then
-    printf '%s...' "${s:0:$((max - 3))}"
-  else
-    printf '%s' "$s"
+
+# _wrap_line: split a string into multiple lines at whitespace boundaries,
+# each line fitting within the given width. Falls back to hard-splitting
+# for any single run of non-whitespace longer than the width. Emits lines
+# via printf '%s\n' so callers can read them with `while IFS= read`.
+_wrap_line() {
+  local s="$1" width="${2:-100}"
+  # Hard guard against tiny widths or empty input.
+  [ "$width" -lt 20 ] && width=20
+  if [ -z "$s" ] || [ "${#s}" -le "$width" ]; then
+    printf '%s\n' "$s"
+    return 0
   fi
+  awk -v w="$width" '
+    {
+      line = ""
+      n = split($0, words, /[ \t]+/)
+      for (i = 1; i <= n; i++) {
+        word = words[i]
+        if (word == "") continue
+        if (length(line) == 0) {
+          # First word on a line. If it itself exceeds width, hard-split it.
+          while (length(word) > w) {
+            print substr(word, 1, w)
+            word = substr(word, w + 1)
+          }
+          line = word
+        } else if (length(line) + 1 + length(word) <= w) {
+          line = line " " word
+        } else {
+          print line
+          while (length(word) > w) {
+            print substr(word, 1, w)
+            word = substr(word, w + 1)
+          }
+          line = word
+        }
+      }
+      if (length(line) > 0) print line
+    }
+  ' <<<"$s"
+}
+
+# _append_wrapped: push wrapped lines of $1 into preview_lines, updating
+# extra_height accordingly. Width defaults to terminal columns - 10 (for
+# "Input: " prefix and popup padding) or 100 if tput fails.
+_append_wrapped() {
+  local s="$1"
+  local cols
+  cols="$(tput cols 2>/dev/null || echo 0)"
+  [ "$cols" -lt 40 ] && cols=110
+  local width=$((cols - 10))
+  local first=1
+  while IFS= read -r _wl; do
+    preview_lines+=("$_wl")
+    if [ "$first" -eq 0 ]; then
+      extra_height=$((extra_height + 1))
+    fi
+    first=0
+  done < <(_wrap_line "$s" "$width")
 }
 
 # preview_lines: array of lines to display. Populated per tool type.
@@ -200,51 +253,68 @@ extra_height=0  # additional lines beyond standard 1-line preview
 if [ -n "$TOOL_INPUT_JSON" ]; then
   case "$TOOL_NAME" in
     Bash)
-      preview_lines+=("$(_truncate "$(_extract command)" 120)")
+      _append_wrapped "$(_extract command)"
       ;;
     WebFetch)
-      preview_lines+=("$(_extract url)")
+      _append_wrapped "$(_extract url)"
       ;;
     WebSearch)
       _q="$(_extract query)"
-      [ -n "$_q" ] && preview_lines+=("search: $_q") || preview_lines+=("$(_extract url)")
+      if [ -n "$_q" ]; then
+        _append_wrapped "search: $_q"
+      else
+        _append_wrapped "$(_extract url)"
+      fi
       ;;
     Edit|Write)
-      preview_lines+=("$(_extract file_path)")
+      _append_wrapped "$(_extract file_path)"
       ;;
     Read|NotebookRead)
-      preview_lines+=("$(_extract file_path)")
+      _append_wrapped "$(_extract file_path)"
       ;;
     NotebookEdit)
       _fp="$(_extract file_path)"
       _cell="$(_extract cell_id)"
-      preview_lines+=("$_fp")
-      [ -n "$_cell" ] && preview_lines+=("cell: $_cell") && extra_height=1
+      _append_wrapped "$_fp"
+      if [ -n "$_cell" ]; then
+        preview_lines+=("cell: $_cell")
+        extra_height=$((extra_height + 1))
+      fi
       ;;
     Grep)
       _pat="$(_extract pattern)"
       _path="$(_extract path)"
-      preview_lines+=("/$_pat/")
-      [ -n "$_path" ] && preview_lines+=("in: $_path") && extra_height=1
+      _append_wrapped "/$_pat/"
+      if [ -n "$_path" ]; then
+        preview_lines+=("in: $_path")
+        extra_height=$((extra_height + 1))
+      fi
       ;;
     Glob)
       _pat="$(_extract pattern)"
       _path="$(_extract path)"
-      preview_lines+=("$_pat")
-      [ -n "$_path" ] && preview_lines+=("in: $_path") && extra_height=1
+      _append_wrapped "$_pat"
+      if [ -n "$_path" ]; then
+        preview_lines+=("in: $_path")
+        extra_height=$((extra_height + 1))
+      fi
       ;;
     Skill)
       _skill="$(_extract skill)"
       _args="$(_extract args)"
       if [ -n "$_args" ]; then
-        preview_lines+=("$_skill $_args")
+        _append_wrapped "$_skill $_args"
       else
-        preview_lines+=("$_skill")
+        _append_wrapped "$_skill"
       fi
       ;;
     Agent)
       _desc="$(_extract description)"
-      [ -n "$_desc" ] && preview_lines+=("$_desc") || preview_lines+=("$(_truncate "$(_extract prompt)" 120)")
+      if [ -n "$_desc" ]; then
+        _append_wrapped "$_desc"
+      else
+        _append_wrapped "$(_extract prompt)"
+      fi
       ;;
     mcp__*)
       # MCP tools: pretty-print the JSON args with indentation.
@@ -266,13 +336,13 @@ if [ -n "$TOOL_INPUT_JSON" ]; then
       extra_height=$((_line_count - 1))
       ;;
     *)
-      preview_lines+=("$(_truncate "$TOOL_INPUT_JSON" 120)")
+      _append_wrapped "$TOOL_INPUT_JSON"
       ;;
   esac
 fi
 # Fallback if nothing was extracted.
 if [ "${#preview_lines[@]}" -eq 0 ]; then
-  preview_lines+=("$(_truncate "$TOOL_INPUT_JSON" 120)")
+  _append_wrapped "$TOOL_INPUT_JSON"
 fi
 
 # Session context for the header (helps distinguish multiple CC sessions).

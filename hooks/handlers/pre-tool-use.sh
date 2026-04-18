@@ -538,10 +538,42 @@ ORDERED_COUNT="$(jq -r 'if type == "array" then length else 0 end' <<<"$ORDERED"
 MATCHED=""   # "allow" | "ask" | ""
 if [ "$ORDERED_COUNT" -gt 0 ]; then
   if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 1 ]; then
-    # Compound Bash command: use per-segment matching algorithm.
+    # Compound Bash command: pre-filter readonly-auto-allowed segments
+    # before per-segment matching. A segment is "covered" if it is either
+    # readonly-auto-allowed OR matches an allow/ask rule. Filtering readonly
+    # segments out lets match_all_segments make its all-or-nothing decision
+    # on the remaining non-readonly segments.
+    #
+    # Example: `go test ./... | tail -50` with user rule `^go` and `tail`
+    # in readonly list -> without filter, tail has no rule and command
+    # falls through to overlay. With filter, tail is dropped, go matches
+    # its rule, command is allowed.
+    #
+    # Guard: only filter when the ORIGINAL command has no output redirects.
+    # If `cat file > /tmp/x` were filtered as readonly, we would mask the
+    # write. has_redirect blocks this case by keeping the full segment list.
+    _FILTERED_SEGMENTS=()
+    if ! has_redirect "$BASH_CMD"; then
+      for _seg in "${BASH_SEGMENTS[@]}"; do
+        if is_readonly_command "$_seg" \
+           && readonly_paths_allowed "$_seg" "$CC_CWD" "$ALLOWED_DIRS_JSON"; then
+          continue
+        fi
+        _FILTERED_SEGMENTS+=("$_seg")
+      done
+    else
+      _FILTERED_SEGMENTS=("${BASH_SEGMENTS[@]}")
+    fi
+
+    # If filtering left 0 segments, all were readonly and step 5b should
+    # have handled it. Defensive fallback: use the original segments.
+    if [ "${#_FILTERED_SEGMENTS[@]}" -eq 0 ]; then
+      _FILTERED_SEGMENTS=("${BASH_SEGMENTS[@]}")
+    fi
+
     _MAS_RESULT=""
     _mas_rc=0
-    _MAS_RESULT="$(match_all_segments "$ORDERED" "$TOOL_NAME" "${BASH_SEGMENTS[@]}" 2>/dev/null)" || _mas_rc=$?
+    _MAS_RESULT="$(match_all_segments "$ORDERED" "$TOOL_NAME" "${_FILTERED_SEGMENTS[@]}" 2>/dev/null)" || _mas_rc=$?
     if [ "$_mas_rc" -eq 2 ]; then
       printf '[passthru] compound allow/ask rule regex error; passing through\n' >&2
       emit_passthrough
@@ -751,13 +783,41 @@ export PASSTHRU_OVERLAY_TOOL_NAME="$TOOL_NAME"
 export PASSTHRU_OVERLAY_TOOL_INPUT_JSON="$TOOL_INPUT"
 export PASSTHRU_OVERLAY_CWD="$CC_CWD"
 
+# For compound Bash commands falling through to overlay, compute which
+# segments are uncovered (not readonly auto-allowed, not matched by any
+# allow/ask rule). The overlay uses this to propose a regex targeting only
+# the uncovered portion, not the full command's first word. Separator is
+# newline since env vars cannot carry NULs portably across multiplexer
+# popups. Segments never contain newlines because split_bash_command splits
+# at operators and redirections.
+PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS=""
+if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 1 ]; then
+  _unallowed_raw="$(compute_unallowed_segments "$ORDERED" "$TOOL_NAME" "$CC_CWD" "$ALLOWED_DIRS_JSON" "${BASH_SEGMENTS[@]}" 2>/dev/null || true)"
+  # Convert NUL separators to newlines for env var transport.
+  if [ -n "$_unallowed_raw" ]; then
+    PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS="$(printf '%s' "$_unallowed_raw" | tr '\0' '\n')"
+  fi
+fi
+export PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS
+
 # --- Overlay queue lock -------------------------------------------------------
-# CC can fire multiple PreToolUse hooks concurrently (parallel tool calls).
-# Only one overlay popup can be visible at a time in a given multiplexer.
-# Without serialization, the second+ hook falls through to CC's native dialog.
-# We use a mkdir-based lock to queue concurrent overlay invocations.
-_OVERLAY_LOCK="${_tmpdir}/passthru-overlay.lock.d"
-_OVERLAY_LOCK_TIMEOUT="${PASSTHRU_OVERLAY_LOCK_TIMEOUT:-90}"
+# CC can fire multiple PreToolUse hooks concurrently, and multiple CC sessions
+# on the same machine will also race for the same tmux/kitty/wezterm popup.
+# Only one overlay popup can be visible at a time. We serialize via a mkdir
+# lock at a user-scope path so the lock is shared across both intra-session
+# concurrent calls and cross-session concurrent calls.
+#
+# The lock MUST live under passthru_user_home, not TMPDIR, because macOS
+# gives each process a per-user (and sometimes per-session) TMPDIR under
+# /var/folders/... which is NOT shared across CC sessions.
+_OVERLAY_LOCK_ROOT="$(passthru_user_home)"
+[ -d "$_OVERLAY_LOCK_ROOT" ] || mkdir -p "$_OVERLAY_LOCK_ROOT" 2>/dev/null || true
+_OVERLAY_LOCK="${_OVERLAY_LOCK_ROOT}/passthru-overlay.lock.d"
+_OVERLAY_LOCK_TIMEOUT="${PASSTHRU_OVERLAY_LOCK_TIMEOUT:-180}"
+# If a lock is older than this, treat it as stale (process died without
+# releasing). Should be > PASSTHRU_OVERLAY_TIMEOUT (default 60s) plus
+# overlay launch + post-processing margin.
+_OVERLAY_LOCK_STALE_AFTER="${PASSTHRU_OVERLAY_LOCK_STALE_AFTER:-180}"
 _overlay_lock_acquired=0
 
 _release_overlay_lock() {
@@ -767,8 +827,27 @@ _release_overlay_lock() {
   fi
 }
 
-# Acquire the lock. Poll at 200ms intervals up to the timeout.
+# Detect and clear stale locks: if the lock directory exists but its mtime
+# is older than _OVERLAY_LOCK_STALE_AFTER seconds, a previous hook was
+# killed (SIGKILL, OOM, etc.) without running its EXIT trap. Force-clean.
+_clear_if_stale() {
+  if [ -d "$_OVERLAY_LOCK" ]; then
+    local mtime
+    mtime="$(stat -f %m "$_OVERLAY_LOCK" 2>/dev/null || stat -c %Y "$_OVERLAY_LOCK" 2>/dev/null || echo 0)"
+    local now age
+    now="$(date +%s)"
+    age=$((now - mtime))
+    if [ "$age" -gt "$_OVERLAY_LOCK_STALE_AFTER" ]; then
+      printf '[passthru] clearing stale overlay lock (age %ds)\n' "$age" >&2
+      rm -rf "$_OVERLAY_LOCK" 2>/dev/null || true
+    fi
+  fi
+}
+
+# Acquire the lock. Poll at 200ms intervals up to the timeout. Check for
+# stale locks every few iterations so a dead hook does not block forever.
 _lock_start="$(date +%s)"
+_stale_check_counter=0
 while true; do
   if mkdir "$_OVERLAY_LOCK" 2>/dev/null; then
     _overlay_lock_acquired=1
@@ -776,6 +855,12 @@ while true; do
     trap '_release_overlay_lock; printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
     trap '_release_overlay_lock' EXIT
     break
+  fi
+  # Every 10th iteration (~2s), check for a stale lock.
+  _stale_check_counter=$((_stale_check_counter + 1))
+  if [ "$_stale_check_counter" -ge 10 ]; then
+    _stale_check_counter=0
+    _clear_if_stale
   fi
   _now="$(date +%s)"
   if [ $((_now - _lock_start)) -ge "$_OVERLAY_LOCK_TIMEOUT" ]; then
@@ -787,7 +872,19 @@ done
 
 # Send a desktop notification so the user knows a permission prompt is waiting.
 # OSC 777 is supported by Ghostty, iTerm2, and other modern terminals.
-printf '\033]777;notify;passthru;permission prompt: %s\a' "$TOOL_NAME" 2>/dev/null || true
+# Write to /dev/tty, not stdout - stdout is captured by CC as the hook's JSON
+# response. When running inside tmux, the OSC sequence must be wrapped in
+# tmux's "passthrough" escape (DCS tmux; ... ST) to reach the outer terminal.
+_notify_msg="passthru: permission prompt: ${TOOL_NAME}"
+if [ -e /dev/tty ]; then
+  if [ -n "${TMUX:-}" ]; then
+    # tmux wraps: ESC P tmux; ESC <escaped-inner> ESC \
+    # Inner ESC characters must be doubled (ESC ESC) for tmux passthrough.
+    printf '\033Ptmux;\033\033]777;notify;passthru;%s\a\033\\' "$_notify_msg" > /dev/tty 2>/dev/null || true
+  else
+    printf '\033]777;notify;passthru;%s\a' "$_notify_msg" > /dev/tty 2>/dev/null || true
+  fi
+fi
 
 # Invoke the overlay and capture its exit code. We have an ERR trap in place
 # (converts unexpected errors to fail-open passthrough), so we cannot rely on

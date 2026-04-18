@@ -1671,6 +1671,71 @@ EOF
   [ "$decision" = "ask" ]
 }
 
+@test "compound: readonly segment covers for compound allow (go test | tail)" {
+  # Regression: `go test ./... | tail -50` with user rule `^go` should
+  # allow the whole compound. tail is readonly; with the pre-filter it
+  # is dropped from match_all_segments and go matches its rule.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^go(\\s|$)" }, "reason": "allow go" }
+  ],
+  "deny": []
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"go test ./... -timeout 60s | tail -50"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  [ "$decision" = "allow" ]
+  reason="$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$output")"
+  [[ "$reason" == *"allow go"* ]]
+}
+
+@test "compound: readonly segment filter respects has_redirect guard" {
+  # `cat file > /tmp/out && ls` has an output redirect. The filter must
+  # NOT drop segments when has_redirect=true, otherwise we would mask
+  # the write. Without user rules, this should fall through to ask.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^cat(\\s|$)" }, "reason": "allow cat" }
+  ],
+  "deny": []
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"cat file > /tmp/out && ls"}}'
+  [ "$status" -eq 0 ]
+  json_line="$(printf '%s\n' "$output" | grep -o '{"hookSpecificOutput".*}' | head -n1)"
+  [ -n "$json_line" ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$json_line")"
+  # ls is readonly. Without the guard, filter would drop ls leaving cat,
+  # and cat matches the rule -> allow. With the guard (has_redirect=true),
+  # both segments stay. cat matches, but ls has no allow rule -> fall
+  # through to ask. This prevents masking the write via the redirect.
+  [ "$decision" = "ask" ]
+}
+
+@test "compound: fd duplication (2>&1) does not trigger has_redirect" {
+  # `go test 2>&1 | head` has no file redirect, only fd duplication.
+  # has_redirect returns false, readonly filter applies. head is readonly,
+  # filter drops it, go matches user rule -> allow.
+  cat > "$USER_ROOT/.claude/passthru.json" <<'EOF'
+{
+  "version": 2,
+  "allow": [
+    { "tool": "Bash", "match": { "command": "^go(\\s|$)" }, "reason": "allow go" }
+  ],
+  "deny": []
+}
+EOF
+  run_handler '{"tool_name":"Bash","tool_input":{"command":"go test ./... 2>&1 | head"}}'
+  [ "$status" -eq 0 ]
+  decision="$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$output")"
+  [ "$decision" = "allow" ]
+}
+
 @test "compound: allow rules covering ALL segments allows compound command" {
   # Two different rules covering two different segments: both must match
   # for the compound command to be allowed. Use non-readonly commands (make,
