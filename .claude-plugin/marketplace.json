@@ -1,6 +1,6 @@
 {
   "name": "passthru",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Regex-based permission rules for Claude Code via hooks",
   "owner": {
     "name": "nnemirovsky"
