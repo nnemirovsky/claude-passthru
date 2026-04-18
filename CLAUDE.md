@@ -18,7 +18,7 @@ commands/
   log.md               /passthru:log slash command (prompt-based)
   overlay.md           /passthru:overlay slash command (wraps scripts/overlay-config.sh)
 hooks/
-  hooks.json           registers PreToolUse (timeout 75s, matcher "*"), PostToolUse +
+  hooks.json           registers PreToolUse (timeout 300s, matcher "*"), PostToolUse +
                        PostToolUseFailure (timeout 10s each, matcher "*"), and
                        SessionStart (timeout 5s, no matcher) handlers
   common.sh            shared library. Functions:
@@ -118,7 +118,10 @@ Variables the plugin reads at runtime. Most are test-only overrides; a couple (`
 * `PASSTHRU_OVERLAY_TEST_ANSWER` - short-circuit the interactive keypress loop in `overlay-dialog.sh`. Accepts `yes_once|yes_always|no_once|no_always|cancel`. Used exclusively by `tests/overlay.bats` + `tests/hook_handler.bats` to exercise every branch without pseudo-tty gymnastics. Never set by the hook in production.
 * `PASSTHRU_OVERLAY_TOOL_NAME` - tool name passed into the overlay dialog. Hook propagates the inbound `tool_name` field verbatim.
 * `PASSTHRU_OVERLAY_TOOL_INPUT_JSON` - tool input JSON (stringified) passed into the overlay dialog. Hook propagates the inbound `tool_input` field verbatim. The dialog and `overlay-propose-rule.sh` parse it for the suggested-rule screen.
-* `PASSTHRU_OVERLAY_TIMEOUT` - seconds to wait for a user response inside the overlay. Default 60. If the user does not respond in time, the overlay exits without writing a verdict and the hook treats the prompt as cancelled (falls through to the native dialog). Setting below 60 is fine; setting above requires also raising the PreToolUse hook timeout (currently 75s).
+* `PASSTHRU_OVERLAY_TIMEOUT` - seconds to wait for a user response inside the overlay. Default 60. If the user does not respond in time, the overlay exits without writing a verdict and the hook treats the prompt as cancelled (falls through to the native dialog). Setting below 60 is fine; setting above requires also raising the PreToolUse hook timeout (currently 300s).
+* `PASSTHRU_OVERLAY_LOCK_TIMEOUT` - seconds to wait for another CC session's overlay to release the user-scope queue lock. Default 180. On timeout, the hook emits the ask fallback (native dialog). See the "Overlay queue lock" section below.
+* `PASSTHRU_OVERLAY_LOCK_STALE_AFTER` - mtime age threshold in seconds after which an existing overlay lock is considered abandoned and auto-cleared. Default 180. Protects against SIGKILLed hooks leaving zombie locks.
+* `PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS` - newline-separated list of compound Bash segments that are NOT covered by readonly auto-allow or by any allow/ask rule. Set by `pre-tool-use.sh` before invoking the overlay. Read by `overlay-propose-rule.sh` so that "yes/no always" proposals target only the uncovered portion instead of the full command's first word.
 * `PASSTHRU_WRITE_LOCK_TIMEOUT` - seconds `scripts/write-rule.sh` and `scripts/remove-rule.sh` wait for the user-scope mkdir lock. Default 5. See the "Write-wrapper locking" section below.
 
 ## How tests run
@@ -221,22 +224,25 @@ concurrent project shells.
 
 `PostToolUse`, `PostToolUseFailure`, and `SessionStart` are registered with
 short timeouts (10s / 10s / 5s) in `hooks/hooks.json`. `PreToolUse` runs with
-a **75s** timeout because Task 8 (v0.5.0) wired the hook to block
-synchronously on the interactive terminal-overlay dialog.
+a **300s** timeout because the hook blocks synchronously on the interactive
+terminal-overlay dialog AND may also queue behind an overlay held by another
+CC session on the same machine.
 
-The 75s figure breaks down as:
+The 300s figure breaks down as:
 
 * The overlay dialog (`scripts/overlay-dialog.sh`) enforces its own 60s
   budget (`PASSTHRU_OVERLAY_TIMEOUT`, default 60s).
-* Add 15s of margin for overlay launch, multiplexer roundtrip, post-dialog
+* The overlay queue lock (`PASSTHRU_OVERLAY_LOCK_TIMEOUT`, default 180s)
+  waits for other sessions' overlays to complete.
+* Add margin for overlay launch, multiplexer roundtrip, post-dialog
   rule write via `write-rule.sh`, and audit line emission.
-* CC's hook timeout is wall-clock (confirmed via `time sleep 1`: 1.008s
-  real). Anything below the overlay's own budget would kill the hook
-  mid-dialog and lose the user's verdict.
+* CC's hook timeout is wall-clock. Anything below the overlay's own budget
+  plus the lock-wait budget would kill the hook mid-wait and lose the
+  user's verdict.
 
 The 10s baseline for non-overlay PreToolUse paths (rule match, mode
 auto-allow) still applies in the sense that none of them block on IO; the
-75s cap only matters when the overlay is actually invoked.
+300s cap only matters when the overlay is actually invoked.
 
 For post-event handlers, the original 10s baseline continues to hold:
 
@@ -255,6 +261,89 @@ For post-event handlers, the original 10s baseline continues to hold:
 Lower the PreToolUse timeout only after also lowering
 `PASSTHRU_OVERLAY_TIMEOUT` (and only after profiling on target hardware).
 Raising it is always safe since the handler fails open on timeout.
+
+## Overlay queue lock (cross-session)
+
+The overlay popup is singleton per machine: tmux/kitty/wezterm can only
+show one popup at a time. Two CC sessions racing for the overlay would
+otherwise both try to open popups and one would fail, falling through to
+CC's native dialog.
+
+`hooks/handlers/pre-tool-use.sh` serializes overlays via a mkdir lock at
+`$(passthru_user_home)/passthru-overlay.lock.d`. The lock MUST live under
+user home, NOT `$TMPDIR`: on macOS `$TMPDIR` resolves to a per-process
+`/var/folders/<session-id>/.../T/` folder that is NOT shared across CC
+sessions of the same user. User home is the only guaranteed shared
+location.
+
+Stale-lock recovery runs every ~2s during wait. If the existing lock's
+mtime is older than `PASSTHRU_OVERLAY_LOCK_STALE_AFTER` (default 180s),
+the lock is force-removed. This prevents a hook that was SIGKILLed
+(OOM, manual kill) from blocking every subsequent overlay forever.
+
+Env knobs:
+
+* `PASSTHRU_OVERLAY_LOCK_TIMEOUT` (default 180s) - how long to wait for
+  another session's overlay before falling back to CC's native dialog.
+* `PASSTHRU_OVERLAY_LOCK_STALE_AFTER` (default 180s) - mtime age at which
+  an existing lock is considered abandoned and auto-cleared.
+
+## Interaction with CC's native permission system
+
+Passthru is one of potentially several PreToolUse hooks AND sits alongside
+CC's built-in permission evaluation. Understanding which decision wins in
+which scenario is essential for debugging "why did the native dialog
+appear?" complaints.
+
+**Decision cascade after PreToolUse hooks return:**
+
+1. If any hook emits `permissionDecision: "allow"` - CC proceeds silently.
+2. If any hook emits `permissionDecision: "deny"` - CC blocks the tool.
+3. If a hook emits `permissionDecision: "ask"` - CC shows its NATIVE
+   dialog. This is by design: "ask" explicitly defers to CC's UI.
+4. If all hooks pass through (`{"continue": true}`) - CC evaluates its own
+   `permissions.allow` entries from `settings.json`. If none match, CC
+   shows its native dialog.
+
+Implication: passthru emitting `ask` (either explicitly or via overlay
+fall-through / lock timeout) will trigger a native dialog. Only `allow`
+fully suppresses it. This is why the compound readonly-filter fix (`go
+test | tail` now resolves to allow instead of ask) eliminates the native
+dialog cascade.
+
+**Multi-plugin hook ordering:**
+
+CC runs PreToolUse hooks in plugin registration order. Each subsequent
+hook sees `tool_input` as MODIFIED by previous hooks. Plugins like `rtk`
+(which rewrites `go test` to `rtk go test`) can either run before or
+after passthru depending on ordering:
+
+* rtk BEFORE passthru: passthru sees `rtk go test ...`. User rule for
+  `^go` does not match. Falls through to overlay.
+* rtk AFTER passthru: passthru sees `go test ...`. User rule matches,
+  decision is "allow". CC then runs rtk which rewrites the command, CC
+  executes the rewritten command.
+
+If the user reports seeing the overlay for BOTH `go ...` and `rtk go ...`
+variants intermittently, hook ordering is non-deterministic or multiple
+rtk code paths (proxy vs rewrite) are in play. Rule coverage should
+anticipate both forms or use a broader pattern.
+
+## Notifications on overlay prompt
+
+`pre-tool-use.sh` sends an OSC 777 desktop notification before invoking
+the overlay so the user knows a prompt is waiting. Two gotchas:
+
+* Must write to `/dev/tty`, NOT stdout. Stdout is captured by CC as the
+  hook's JSON response and the OSC sequence would pollute (or invalidate)
+  the JSON payload.
+* Inside tmux, the OSC must be wrapped in DCS passthrough: `ESC P tmux;
+  <inner> ESC \` with every inner `ESC` doubled. Additionally tmux needs
+  `set -g allow-passthrough on` in the user's tmux.conf. Without
+  passthrough, tmux strips the OSC and Ghostty/iTerm2 never sees it.
+
+OSC 777 format: `ESC ] 777 ; notify ; <title> ; <body> BEL`. Supported
+by Ghostty, iTerm2, Konsole, and most modern terminal emulators.
 
 ## Compound command splitting
 
