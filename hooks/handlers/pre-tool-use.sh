@@ -801,12 +801,23 @@ fi
 export PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS
 
 # --- Overlay queue lock -------------------------------------------------------
-# CC can fire multiple PreToolUse hooks concurrently (parallel tool calls).
-# Only one overlay popup can be visible at a time in a given multiplexer.
-# Without serialization, the second+ hook falls through to CC's native dialog.
-# We use a mkdir-based lock to queue concurrent overlay invocations.
-_OVERLAY_LOCK="${_tmpdir}/passthru-overlay.lock.d"
-_OVERLAY_LOCK_TIMEOUT="${PASSTHRU_OVERLAY_LOCK_TIMEOUT:-90}"
+# CC can fire multiple PreToolUse hooks concurrently, and multiple CC sessions
+# on the same machine will also race for the same tmux/kitty/wezterm popup.
+# Only one overlay popup can be visible at a time. We serialize via a mkdir
+# lock at a user-scope path so the lock is shared across both intra-session
+# concurrent calls and cross-session concurrent calls.
+#
+# The lock MUST live under passthru_user_home, not TMPDIR, because macOS
+# gives each process a per-user (and sometimes per-session) TMPDIR under
+# /var/folders/... which is NOT shared across CC sessions.
+_OVERLAY_LOCK_ROOT="$(passthru_user_home)"
+[ -d "$_OVERLAY_LOCK_ROOT" ] || mkdir -p "$_OVERLAY_LOCK_ROOT" 2>/dev/null || true
+_OVERLAY_LOCK="${_OVERLAY_LOCK_ROOT}/passthru-overlay.lock.d"
+_OVERLAY_LOCK_TIMEOUT="${PASSTHRU_OVERLAY_LOCK_TIMEOUT:-180}"
+# If a lock is older than this, treat it as stale (process died without
+# releasing). Should be > PASSTHRU_OVERLAY_TIMEOUT (default 60s) plus
+# overlay launch + post-processing margin.
+_OVERLAY_LOCK_STALE_AFTER="${PASSTHRU_OVERLAY_LOCK_STALE_AFTER:-180}"
 _overlay_lock_acquired=0
 
 _release_overlay_lock() {
@@ -816,8 +827,27 @@ _release_overlay_lock() {
   fi
 }
 
-# Acquire the lock. Poll at 200ms intervals up to the timeout.
+# Detect and clear stale locks: if the lock directory exists but its mtime
+# is older than _OVERLAY_LOCK_STALE_AFTER seconds, a previous hook was
+# killed (SIGKILL, OOM, etc.) without running its EXIT trap. Force-clean.
+_clear_if_stale() {
+  if [ -d "$_OVERLAY_LOCK" ]; then
+    local mtime
+    mtime="$(stat -f %m "$_OVERLAY_LOCK" 2>/dev/null || stat -c %Y "$_OVERLAY_LOCK" 2>/dev/null || echo 0)"
+    local now age
+    now="$(date +%s)"
+    age=$((now - mtime))
+    if [ "$age" -gt "$_OVERLAY_LOCK_STALE_AFTER" ]; then
+      printf '[passthru] clearing stale overlay lock (age %ds)\n' "$age" >&2
+      rm -rf "$_OVERLAY_LOCK" 2>/dev/null || true
+    fi
+  fi
+}
+
+# Acquire the lock. Poll at 200ms intervals up to the timeout. Check for
+# stale locks every few iterations so a dead hook does not block forever.
 _lock_start="$(date +%s)"
+_stale_check_counter=0
 while true; do
   if mkdir "$_OVERLAY_LOCK" 2>/dev/null; then
     _overlay_lock_acquired=1
@@ -825,6 +855,12 @@ while true; do
     trap '_release_overlay_lock; printf "[passthru] unexpected error in pre-tool-use.sh\n" >&2; emit_passthrough; exit 0' ERR
     trap '_release_overlay_lock' EXIT
     break
+  fi
+  # Every 10th iteration (~2s), check for a stale lock.
+  _stale_check_counter=$((_stale_check_counter + 1))
+  if [ "$_stale_check_counter" -ge 10 ]; then
+    _stale_check_counter=0
+    _clear_if_stale
   fi
   _now="$(date +%s)"
   if [ $((_now - _lock_start)) -ge "$_OVERLAY_LOCK_TIMEOUT" ]; then
