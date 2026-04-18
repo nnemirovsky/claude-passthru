@@ -538,10 +538,42 @@ ORDERED_COUNT="$(jq -r 'if type == "array" then length else 0 end' <<<"$ORDERED"
 MATCHED=""   # "allow" | "ask" | ""
 if [ "$ORDERED_COUNT" -gt 0 ]; then
   if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 1 ]; then
-    # Compound Bash command: use per-segment matching algorithm.
+    # Compound Bash command: pre-filter readonly-auto-allowed segments
+    # before per-segment matching. A segment is "covered" if it is either
+    # readonly-auto-allowed OR matches an allow/ask rule. Filtering readonly
+    # segments out lets match_all_segments make its all-or-nothing decision
+    # on the remaining non-readonly segments.
+    #
+    # Example: `go test ./... | tail -50` with user rule `^go` and `tail`
+    # in readonly list -> without filter, tail has no rule and command
+    # falls through to overlay. With filter, tail is dropped, go matches
+    # its rule, command is allowed.
+    #
+    # Guard: only filter when the ORIGINAL command has no output redirects.
+    # If `cat file > /tmp/x` were filtered as readonly, we would mask the
+    # write. has_redirect blocks this case by keeping the full segment list.
+    _FILTERED_SEGMENTS=()
+    if ! has_redirect "$BASH_CMD"; then
+      for _seg in "${BASH_SEGMENTS[@]}"; do
+        if is_readonly_command "$_seg" \
+           && readonly_paths_allowed "$_seg" "$CC_CWD" "$ALLOWED_DIRS_JSON"; then
+          continue
+        fi
+        _FILTERED_SEGMENTS+=("$_seg")
+      done
+    else
+      _FILTERED_SEGMENTS=("${BASH_SEGMENTS[@]}")
+    fi
+
+    # If filtering left 0 segments, all were readonly and step 5b should
+    # have handled it. Defensive fallback: use the original segments.
+    if [ "${#_FILTERED_SEGMENTS[@]}" -eq 0 ]; then
+      _FILTERED_SEGMENTS=("${BASH_SEGMENTS[@]}")
+    fi
+
     _MAS_RESULT=""
     _mas_rc=0
-    _MAS_RESULT="$(match_all_segments "$ORDERED" "$TOOL_NAME" "${BASH_SEGMENTS[@]}" 2>/dev/null)" || _mas_rc=$?
+    _MAS_RESULT="$(match_all_segments "$ORDERED" "$TOOL_NAME" "${_FILTERED_SEGMENTS[@]}" 2>/dev/null)" || _mas_rc=$?
     if [ "$_mas_rc" -eq 2 ]; then
       printf '[passthru] compound allow/ask rule regex error; passing through\n' >&2
       emit_passthrough
