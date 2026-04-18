@@ -85,6 +85,14 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     emit_fallback
     exit 0
   fi
+  # If the hook identified specific uncovered segments (compound command
+  # where some parts are already auto-allowed), target the first uncovered
+  # segment instead of the whole command. This produces a useful rule for
+  # the part that actually needs it.
+  if [ -n "${PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS:-}" ]; then
+    # Take the first non-empty line.
+    cmd="$(printf '%s\n' "$PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS" | awk 'NF{print; exit}')"
+  fi
   # First token = first word of the command. Trim leading whitespace then
   # split on whitespace.
   cmd="${cmd#"${cmd%%[![:space:]]*}"}"

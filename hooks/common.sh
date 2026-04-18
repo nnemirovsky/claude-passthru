@@ -2186,3 +2186,69 @@ match_all_segments() {
 
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# compute_unallowed_segments
+# ---------------------------------------------------------------------------
+#
+# Usage: compute_unallowed_segments <ordered_entries_json> <tool_name> \
+#                                   <cwd> <allowed_dirs_json> <segments...>
+#
+# For compound Bash commands that fall through to the overlay, identifies
+# which segments are NOT covered by readonly auto-allow or by any allow/ask
+# rule. The overlay uses this information to propose a rule targeting only
+# the uncovered portion instead of the full command's first word.
+#
+# A segment is "unallowed" if:
+#   - It is NOT read-only auto-allowed (either not in readonly list or
+#     has absolute path outside cwd/allowed_dirs).
+#   - AND it does not match any allow or ask rule in ordered_entries.
+#
+# Output (stdout): NUL-separated list of unallowed segment strings.
+# Return: 0 always.
+compute_unallowed_segments() {
+  local ordered="$1"
+  local tool_name="$2"
+  local cwd="$3"
+  local allowed_dirs_json="$4"
+  shift 4
+
+  local _cus_segments=("$@")
+  local seg_count="${#_cus_segments[@]}"
+  [ "$seg_count" -eq 0 ] && return 0
+
+  local ordered_count
+  ordered_count="$(jq -r 'if type == "array" then length else 0 end' <<<"$ordered" 2>/dev/null)"
+  [ -z "$ordered_count" ] && ordered_count=0
+
+  local seg seg_idx seg_input entry rule mrc matched
+  for ((seg_idx = 0; seg_idx < seg_count; seg_idx++)); do
+    seg="${_cus_segments[$seg_idx]}"
+
+    # Skip read-only segments with valid paths.
+    if is_readonly_command "$seg" \
+       && readonly_paths_allowed "$seg" "$cwd" "$allowed_dirs_json"; then
+      continue
+    fi
+
+    # Check if it matches any allow/ask rule.
+    seg_input="$(jq -cn --arg c "$seg" '{command: $c}')"
+    matched=0
+    local i
+    for ((i = 0; i < ordered_count; i++)); do
+      entry="$(jq -c --argjson i "$i" '.[$i]' <<<"$ordered" 2>/dev/null)"
+      rule="$(jq -c '.rule // {}' <<<"$entry" 2>/dev/null)"
+      mrc=0
+      match_rule "$tool_name" "$seg_input" "$rule" || mrc=$?
+      if [ "$mrc" -eq 0 ]; then
+        matched=1
+        break
+      fi
+    done
+
+    if [ "$matched" -eq 0 ]; then
+      printf '%s\0' "$seg"
+    fi
+  done
+  return 0
+}

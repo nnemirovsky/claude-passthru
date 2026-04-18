@@ -282,6 +282,37 @@ restricted_path() {
   [ "$output" = '^rm(\s[^<>()\$\x60|{}&;\n\r]*)?$' ]
 }
 
+@test "propose-rule: Bash uses unallowed segments env var when set" {
+  # Compound command where ls is auto-allowed but weird_cmd is not.
+  # The proposer should target weird_cmd, not ls.
+  export PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS="weird_cmd --flag"
+  run bash "$PROPOSER" "Bash" '{"command":"ls && weird_cmd --flag"}'
+  unset PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS
+  [ "$status" -eq 0 ]
+  run jq -r '.match.command' <<<"$output"
+  [ "$output" = '^weird_cmd(\s[^<>()\$\x60|{}&;\n\r]*)?$' ]
+}
+
+@test "propose-rule: Bash uses first non-empty unallowed segment" {
+  # Multiple unallowed segments; should use the first.
+  export PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS=$'npm test\ncargo build'
+  run bash "$PROPOSER" "Bash" '{"command":"ls && npm test && cargo build"}'
+  unset PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS
+  [ "$status" -eq 0 ]
+  run jq -r '.match.command' <<<"$output"
+  [ "$output" = '^npm(\s[^<>()\$\x60|{}&;\n\r]*)?$' ]
+}
+
+@test "propose-rule: Bash ignores empty unallowed segments env var" {
+  # Empty env var should fall back to using the whole command's first word.
+  export PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS=""
+  run bash "$PROPOSER" "Bash" '{"command":"git status"}'
+  unset PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS
+  [ "$status" -eq 0 ]
+  run jq -r '.match.command' <<<"$output"
+  [ "$output" = '^git(\s[^<>()\$\x60|{}&;\n\r]*)?$' ]
+}
+
 @test "propose-rule: Read file_path -> parent-dir prefix match" {
   run bash "$PROPOSER" "Read" '{"file_path":"/Users/me/proj/src/file.ts"}'
   [ "$status" -eq 0 ]

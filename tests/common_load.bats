@@ -466,3 +466,39 @@ EOF
   run validate_rules "$merged"
   [ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# compute_unallowed_segments
+# ---------------------------------------------------------------------------
+
+@test "compute_unallowed_segments: readonly segment is filtered out" {
+  # Two segments: ls (readonly) and weird_cmd (not readonly, no rule).
+  # Only weird_cmd should be returned.
+  result="$(compute_unallowed_segments '[]' "Bash" "$PROJ_ROOT" "[]" "ls" "weird_cmd --flag" | tr '\0' '\n')"
+  [ "$result" = "weird_cmd --flag" ]
+}
+
+@test "compute_unallowed_segments: allow-rule segment is filtered out" {
+  # Ordered allow/ask list covers 'git' but not 'weird_cmd'.
+  ordered='[{"list":"allow","merged_idx":0,"rule":{"tool":"Bash","match":{"command":"^git\\b"}}}]'
+  result="$(compute_unallowed_segments "$ordered" "Bash" "$PROJ_ROOT" "[]" "git status" "weird_cmd" | tr '\0' '\n')"
+  [ "$result" = "weird_cmd" ]
+}
+
+@test "compute_unallowed_segments: all readonly returns empty" {
+  # All segments readonly -> returns empty.
+  result="$(compute_unallowed_segments '[]' "Bash" "$PROJ_ROOT" "[]" "ls" "cat README.md" | tr '\0' '\n')"
+  [ -z "$result" ]
+}
+
+@test "compute_unallowed_segments: no rules and no readonly returns all" {
+  # Nothing covers the segments -> all are unallowed.
+  result="$(compute_unallowed_segments '[]' "Bash" "$PROJ_ROOT" "[]" "weird_a" "weird_b" | tr '\0' '\n')"
+  [ "$result" = "$(printf 'weird_a\nweird_b')" ]
+}
+
+@test "compute_unallowed_segments: readonly with invalid path is not filtered" {
+  # cat with absolute path outside cwd -> not readonly-allowed -> uncovered.
+  result="$(compute_unallowed_segments '[]' "Bash" "$PROJ_ROOT" "[]" "cat /etc/passwd" | tr '\0' '\n')"
+  [ "$result" = "cat /etc/passwd" ]
+}

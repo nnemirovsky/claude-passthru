@@ -751,6 +751,23 @@ export PASSTHRU_OVERLAY_TOOL_NAME="$TOOL_NAME"
 export PASSTHRU_OVERLAY_TOOL_INPUT_JSON="$TOOL_INPUT"
 export PASSTHRU_OVERLAY_CWD="$CC_CWD"
 
+# For compound Bash commands falling through to overlay, compute which
+# segments are uncovered (not readonly auto-allowed, not matched by any
+# allow/ask rule). The overlay uses this to propose a regex targeting only
+# the uncovered portion, not the full command's first word. Separator is
+# newline since env vars cannot carry NULs portably across multiplexer
+# popups. Segments never contain newlines because split_bash_command splits
+# at operators and redirections.
+PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS=""
+if [ "$TOOL_NAME" = "Bash" ] && [ "$BASH_SEGMENT_COUNT" -gt 1 ]; then
+  _unallowed_raw="$(compute_unallowed_segments "$ORDERED" "$TOOL_NAME" "$CC_CWD" "$ALLOWED_DIRS_JSON" "${BASH_SEGMENTS[@]}" 2>/dev/null || true)"
+  # Convert NUL separators to newlines for env var transport.
+  if [ -n "$_unallowed_raw" ]; then
+    PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS="$(printf '%s' "$_unallowed_raw" | tr '\0' '\n')"
+  fi
+fi
+export PASSTHRU_OVERLAY_UNALLOWED_SEGMENTS
+
 # --- Overlay queue lock -------------------------------------------------------
 # CC can fire multiple PreToolUse hooks concurrently (parallel tool calls).
 # Only one overlay popup can be visible at a time in a given multiplexer.
@@ -787,7 +804,19 @@ done
 
 # Send a desktop notification so the user knows a permission prompt is waiting.
 # OSC 777 is supported by Ghostty, iTerm2, and other modern terminals.
-printf '\033]777;notify;passthru;permission prompt: %s\a' "$TOOL_NAME" 2>/dev/null || true
+# Write to /dev/tty, not stdout - stdout is captured by CC as the hook's JSON
+# response. When running inside tmux, the OSC sequence must be wrapped in
+# tmux's "passthrough" escape (DCS tmux; ... ST) to reach the outer terminal.
+_notify_msg="passthru: permission prompt: ${TOOL_NAME}"
+if [ -e /dev/tty ]; then
+  if [ -n "${TMUX:-}" ]; then
+    # tmux wraps: ESC P tmux; ESC <escaped-inner> ESC \
+    # Inner ESC characters must be doubled (ESC ESC) for tmux passthrough.
+    printf '\033Ptmux;\033\033]777;notify;passthru;%s\a\033\\' "$_notify_msg" > /dev/tty 2>/dev/null || true
+  else
+    printf '\033]777;notify;passthru;%s\a' "$_notify_msg" > /dev/tty 2>/dev/null || true
+  fi
+fi
 
 # Invoke the overlay and capture its exit code. We have an ERR trap in place
 # (converts unexpected errors to fail-open passthrough), so we cannot rely on
