@@ -67,7 +67,7 @@ When adding a breaking change to the schema (renaming a field, changing a field'
 
 1. Bump the schema version from `1` to `2` in the verifier, hook, and docs.
 2. Add a migration path if the new format cannot be read by the old loader. At minimum, the verifier should print a clear error pointing users at an upgrade doc.
-3. Call the change out in the release notes (see Releases section in `CLAUDE.md`).
+3. Call the change out in the release notes (see the Releases section in `.claude/CLAUDE.md`).
 
 Non-breaking additions (new optional fields, new optional top-level keys) do not require a version bump. They stay on `version: 1`.
 
@@ -138,4 +138,4 @@ The `allowed_dirs` field in passthru.json extends the set of trusted directories
 
 Commits follow the scoped Conventional Commits style: `type(scope): description`. Scope is always required. PR titles use the same format.
 
-Release cuts happen from `main` via the `release-tools:new` skill. Never cut a release from a feature branch. See the `Releases` section in `CLAUDE.md` for the full procedure.
+Release cuts happen from `main` via the `release-tools:new` skill. Never cut a release from a feature branch. See the `Releases` section in `.claude/CLAUDE.md` for the full procedure.
