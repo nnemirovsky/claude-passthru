@@ -103,7 +103,7 @@ docs/
   plans/               implementation plans (historical, not runtime)
 README.md              user-facing documentation
 CONTRIBUTING.md        contributor guide
-CLAUDE.md              this file
+.claude/CLAUDE.md      this file
 ```
 
 Paths honor `PASSTHRU_USER_HOME` and `PASSTHRU_PROJECT_DIR` so tests never touch the real `~/.claude`.
