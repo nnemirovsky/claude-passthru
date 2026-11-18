@@ -2,5 +2,12 @@
   "name": "passthru",
   "version": "0.7.0",
   "description": "Regex-based permission rules for Claude Code via hooks",
-  "license": "MIT"
+  "author": {
+    "name": "Nikita Nemirovsky",
+    "url": "https://github.com/nnemirovsky"
+  },
+  "homepage": "https://github.com/nnemirovsky/claude-passthru",
+  "repository": "https://github.com/nnemirovsky/claude-passthru",
+  "license": "MIT",
+  "privacyPolicyUrl": "https://github.com/nnemirovsky/claude-passthru/blob/main/PRIVACY.md"
 }
