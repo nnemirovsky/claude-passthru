@@ -231,4 +231,4 @@ The verifier (`scripts/verify.sh`) runs these checks across the merged set:
 * **conflict** - identical `tool + match` appears in two or more of (`allow[]`, `deny[]`, `ask[]`) post-merge. Error.
 * **shadowing** - within one merged `allow[]`, `deny[]`, or `ask[]`, a later rule duplicates an earlier one. Warning.
 
-See [`CLAUDE.md`](../CLAUDE.md) section "Verifier CLI flags" for the exact flags and exit codes.
+See [`.claude/CLAUDE.md`](../.claude/CLAUDE.md) section "Verifier CLI flags" for the exact flags and exit codes.

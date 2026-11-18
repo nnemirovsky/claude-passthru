@@ -24,7 +24,13 @@ More examples: shape-matching a `gh api` endpoint across any owner/repo pair, al
 
 ```
 /plugin marketplace add nnemirovsky/claude-passthru
-/plugin install passthru
+/plugin install passthru@passthru
+```
+
+Or in one step from a shell (Claude Code 2.1.275 or later):
+
+```
+claude plugin install passthru --marketplace nnemirovsky/claude-passthru
 ```
 
 ## What you can do

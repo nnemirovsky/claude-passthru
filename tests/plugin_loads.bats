@@ -96,7 +96,7 @@ setup() {
   run jq -r '.hooks.PreToolUse[0].hooks[0].command' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]
   [[ "$output" == *'${CLAUDE_PLUGIN_ROOT}'* ]]
-  [[ "$output" == *'pre-tool-use.sh' ]]
+  [[ "$output" == *'pre-tool-use.sh'* ]]
 }
 
 @test "hooks/hooks.json PreToolUse timeout is 300 (overlay interactive budget)" {
@@ -125,7 +125,7 @@ setup() {
   run jq -r '.hooks.PostToolUse[0].hooks[0].command' "$REPO_ROOT/hooks/hooks.json"
   [ "$status" -eq 0 ]
   [[ "$output" == *'${CLAUDE_PLUGIN_ROOT}'* ]]
-  [[ "$output" == *'post-tool-use.sh' ]]
+  [[ "$output" == *'post-tool-use.sh'* ]]
 }
 
 @test "hooks/hooks.json PostToolUse timeout is 10" {
@@ -155,7 +155,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == bash\ * ]]
   [[ "$output" == *'${CLAUDE_PLUGIN_ROOT}'* ]]
-  [[ "$output" == *'post-tool-use-failure.sh' ]]
+  [[ "$output" == *'post-tool-use-failure.sh'* ]]
 }
 
 @test "hooks/hooks.json PostToolUseFailure timeout is 10" {
@@ -184,7 +184,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == bash\ * ]]
   [[ "$output" == *'${CLAUDE_PLUGIN_ROOT}'* ]]
-  [[ "$output" == *'session-start.sh' ]]
+  [[ "$output" == *'session-start.sh'* ]]
 }
 
 @test "hooks/hooks.json SessionStart timeout is 5" {
